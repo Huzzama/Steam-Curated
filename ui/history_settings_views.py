@@ -354,14 +354,40 @@ class SettingsView(ctk.CTkFrame):
         )
         self._sk_token_entry.pack(side="left", padx=(0, 8))
 
+        _initial_status = "✓ Token saved" if current_token else ""
+        _initial_color  = COLORS["green"] if current_token else COLORS["text_dim"]
         self._sk_status_lbl = ctk.CTkLabel(
-            token_row, text="",
+            token_row, text=_initial_status,
             font=ctk.CTkFont(size=11),
-            text_color=COLORS["text_dim"],
+            text_color=_initial_color,
         )
         self._sk_status_lbl.pack(side="left")
 
-        ctk.CTkButton(
+        # Verify saved token in background on open
+        if current_token:
+            import threading
+            def _bg_verify():
+                from services.steamkustom_auth import verify_token
+                user = verify_token(current_token)
+                def _upd():
+                    try:
+                        if user:
+                            name = user.get("username", "Connected")
+                            self._sk_status_lbl.configure(
+                                text=f"✓ {name}",
+                                text_color=COLORS["green"]
+                            )
+                        else:
+                            self._sk_status_lbl.configure(
+                                text="Token saved (could not verify)",
+                                text_color=COLORS["gold"]
+                            )
+                    except Exception:
+                        pass
+                self._sk_status_lbl.after(0, _upd)
+            threading.Thread(target=_bg_verify, daemon=True).start()
+
+        self._verify_btn = ctk.CTkButton(
             content,
             text="Verify Token",
             command=self._verify_sk_token,
@@ -371,7 +397,8 @@ class SettingsView(ctk.CTkFrame):
             hover_color=COLORS["card_hover"],
             corner_radius=6, height=30, width=120,
             font=ctk.CTkFont(size=11),
-        ).pack(anchor="w", pady=(0, 4))
+        )
+        self._verify_btn.pack(anchor="w", pady=(0, 4))
 
         ctk.CTkLabel(
             content,
@@ -417,29 +444,43 @@ class SettingsView(ctk.CTkFrame):
             return
 
         self._sk_status_lbl.configure(text="Verifying…", text_color=COLORS["blue"])
+        self._verify_btn.configure(state="disabled")
 
         import threading
+        widget_ref = self  # capture reference
+
         def _check():
-            from services.steamkustom_auth import verify_token
-            user = verify_token(token)
+            try:
+                from services.steamkustom_auth import verify_token
+                user = verify_token(token)
+                print(f"[PimpMySteam] verify_token result: {user}")
+            except Exception as e:
+                print(f"[PimpMySteam] verify_token error: {e}")
+                user = None
+
             def _update():
-                if user:
-                    from ui.settings_loader import load_settings, save_settings
-                    s = load_settings()
-                    s["steamkustom_token"] = token
-                    save_settings(s)
-                    self._settings["steamkustom_token"] = token
-                    self._sk_token_entry.configure(show="•")
-                    self._sk_status_lbl.configure(
-                        text=f"✓ {user.get('username', 'Connected')}",
-                        text_color=COLORS["green"],
-                    )
-                else:
-                    self._sk_status_lbl.configure(
-                        text="✗ Invalid token",
-                        text_color=COLORS["red"],
-                    )
-            self.after(0, _update)
+                try:
+                    widget_ref._verify_btn.configure(state="normal")
+                    if user:
+                        from ui.settings_loader import load_settings, save_settings
+                        s = load_settings()
+                        s["steamkustom_token"] = token
+                        save_settings(s)
+                        widget_ref._settings["steamkustom_token"] = token
+                        widget_ref._sk_token_entry.configure(show="•")
+                        widget_ref._sk_status_lbl.configure(
+                            text=f"✓ {user.get('username', 'Connected')}",
+                            text_color=COLORS["green"],
+                        )
+                    else:
+                        widget_ref._sk_status_lbl.configure(
+                            text="✗ Invalid token — check pimpmysteam.com",
+                            text_color=COLORS["red"],
+                        )
+                except Exception as e:
+                    print(f"[PimpMySteam] _update error: {e}")
+
+            widget_ref.after(0, _update)
 
         threading.Thread(target=_check, daemon=True).start()
 
