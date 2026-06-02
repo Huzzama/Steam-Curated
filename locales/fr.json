@@ -1,0 +1,218 @@
+{
+  "app": {
+    "name": "Steam Library Curator",
+    "subtitle": "Biblioteca Pessoal"
+  },
+  "nav": {
+    "wishlist": "Lista de Desejos",
+    "dashboard": "Painel",
+    "deals": "Ofertas",
+    "history": "Histórico",
+    "settings": "Configurações"
+  },
+  "nav_sections": {
+    "collection": "Coleção",
+    "tools": "Ferramentas"
+  },
+  "actions": {
+    "add": "Adicionar jogo",
+    "edit": "Editar",
+    "delete": "Excluir",
+    "save": "Salvar",
+    "cancel": "Cancelar",
+    "refresh": "Atualizar preços",
+    "search": "Buscar jogo...",
+    "export": "Exportar Excel"
+  },
+  "filters": {
+    "all": "Todos",
+    "priority_sa": "S/A",
+    "on_sale": "Em oferta"
+  },
+  "game": {
+    "name": "Nome",
+    "app_id": "Steam AppID",
+    "genre": "Gênero",
+    "year": "Ano",
+    "developer": "Desenvolvedor",
+    "publisher": "Publisher",
+    "priority": "Prioridade",
+    "status": "Status",
+    "price_current": "Preço atual",
+    "price_low": "Mínimo histórico",
+    "price_diff": "Diferença",
+    "date_added": "Adicionado em",
+    "notes": "Notas",
+    "rating": "Avaliação"
+  },
+  "recommendation": {
+    "buy_now": "Comprar agora",
+    "near_low": "Perto do mínimo",
+    "wait": "Aguardar oferta",
+    "no_data": "Sem dados"
+  },
+  "stats": {
+    "total_games": "Jogos na lista",
+    "total_value": "Valor atual",
+    "min_value": "No mínimo histórico",
+    "savings": "Economia em oferta",
+    "priority_s": "Prioridade S",
+    "on_sale_now": "Em oferta"
+  },
+  "dashboard": {
+    "title": "Painel",
+    "priorities": "Distribuição por Prioridade",
+    "genres": "Distribuição por Gênero",
+    "decades": "Distribuição por Década",
+    "economic": "Valor Econômico",
+    "no_data": "Dados insuficientes para exibir o gráfico"
+  },
+  "deals": {
+    "title": "Ofertas",
+    "on_sale": "Em oferta agora",
+    "upcoming": "Próximos eventos de venda",
+    "confirmed": "Confirmado",
+    "estimated": "Estimado",
+    "starts": "Início",
+    "ends": "Fim",
+    "days_left": "{n} dias restantes",
+    "starts_in": "Começa em {n} dias",
+    "no_deals": "Nenhum jogo da sua lista está em oferta agora",
+    "discount": "Desconto",
+    "save_amount": "Você economiza",
+    "active_now": "🔥 ATIVO AGORA",
+    "refresh_all": "↻ Atualizar todos os preços",
+    "currency_note": "Preços em {currency} — altere nas Configurações"
+  },
+  "history": {
+    "title": "Histórico",
+    "subtitle": "Jogos adicionados recentemente à lista de desejos",
+    "added_on": "Adicionado em {date}",
+    "empty": "Nenhum jogo no histórico ainda"
+  },
+  "settings": {
+    "title": "Configurações",
+    "language": "Idioma",
+    "language_desc": "Selecione o idioma da interface",
+    "api_key": "Chave de API do SteamGridDB",
+    "api_key_desc": "Necessária para baixar imagens de capa",
+    "excel_path": "Caminho do arquivo Excel",
+    "save_settings": "Salvar configurações",
+    "saved": "Configurações salvas com sucesso",
+    "currency_section": "País / Moeda",
+    "currency_desc": "Define a moeda exibida nos preços do Steam.",
+    "refresh_all": "Atualizar todos os preços",
+    "refreshing": "Atualizando {n} jogos...",
+    "refresh_done": "✓ {n} preços atualizados",
+    "show_key": "👁 Mostrar",
+    "hide_key": "🙈 Ocultar",
+    "key_saved": "✓ Chave de API salva",
+    "key_missing": "⚠ Sem chave de API — capas não serão baixadas"
+  },
+  "add_game": {
+    "title": "Adicionar jogo à Lista de Desejos",
+    "search_appid": "Buscar por nome ou AppID",
+    "fetching": "Obtendo dados...",
+    "cover_fetching": "Baixando capa...",
+    "success": "Jogo adicionado com sucesso",
+    "error_not_found": "Jogo não encontrado no Steam",
+    "error_api": "Erro ao conectar ao Steam",
+    "search_btn": "Buscar",
+    "hint": "Digite um nome ou AppID e pressione Buscar",
+    "section_results": "RESULTADOS",
+    "section_preview": "PRÉVIA",
+    "placeholder": "Os resultados aparecerão aqui",
+    "searching": "Buscando...",
+    "select_hint": "{n} resultados — clique para selecionar",
+    "selected": "✓ {name} — obtendo dados...",
+    "data_ok": "✓ Dados obtidos — escolha a prioridade e salve",
+    "free": "Grátis"
+  },
+  "priority": {
+    "S": "S — Compra obrigatória",
+    "A": "A — Muito importante",
+    "B": "B — Interessante",
+    "C": "C — Baixa prioridade"
+  },
+  "status": {
+    "Wishlist": "Lista de Desejos",
+    "Archivado": "Arquivado"
+  },
+  "months": {
+    "1": "Janeiro",
+    "2": "Fevereiro",
+    "3": "Março",
+    "4": "Abril",
+    "5": "Maio",
+    "6": "Junho",
+    "7": "Julho",
+    "8": "Agosto",
+    "9": "Setembro",
+    "10": "Outubro",
+    "11": "Novembro",
+    "12": "Dezembro"
+  },
+  "detail": {
+    "check_on_steam": "Ver na Steam ▶",
+    "retry_cover": "⬇ Tentar capa novamente",
+    "refresh_prices": "↻ Atualizar preços",
+    "delete_game": "🗑 Remover da lista",
+    "base_price": "Preço base",
+    "edit_section": "Editar"
+  },
+  "sale_events": {
+    "lunar_new_year": "Promoção Ano Novo Lunar",
+    "spring_sale": "Promoção de Primavera",
+    "summer_sale": "Promoção de Verão",
+    "autumn_sale": "Promoção de Outono",
+    "halloween_sale": "Promoção de Halloween",
+    "black_friday": "Black Friday",
+    "winter_sale": "Promoção de Inverno",
+    "lunar_new_year_2026": "Promoção Ano Novo Lunar 2026",
+    "spring_sale_2026": "Promoção de Primavera 2026",
+    "summer_sale_2026": "Promoção de Verão 2026",
+    "halloween_sale_2026": "Promoção de Halloween 2026",
+    "black_friday_2026": "Black Friday 2026",
+    "autumn_sale_2026": "Promoção de Outono 2026",
+    "winter_sale_2026": "Promoção de Inverno 2026",
+    "lunar_new_year_2027": "Promoção Ano Novo Lunar 2027",
+    "spring_sale_2027": "Promoção de Primavera 2027",
+    "summer_sale_2027": "Promoção de Verão 2027"
+  },
+  "sync": {
+    "title": "Sincronização com Google Drive",
+    "desc": "Salve sua lista e capas no seu Google Drive pessoal.",
+    "status_ok": "✓ Conectado ao Google Drive",
+    "status_no_token": "Não conectado — clique em Conectar",
+    "status_no_file": "⚠ Falta client_secret.json na pasta do projeto",
+    "btn_connect": "Conectar com Google",
+    "btn_disconnect": "Desconectar",
+    "btn_upload": "⬆ Enviar para Drive",
+    "btn_download": "⬇ Baixar do Drive",
+    "uploading": "Enviando {file}...",
+    "downloading": "Baixando {file}...",
+    "upload_done": "✓ {n} arquivos enviados",
+    "download_done": "✓ {n} arquivos baixados",
+    "error": "Erro: {msg}",
+    "connecting": "Abrindo navegador para autenticar...",
+    "connect_done": "✓ Conectado com sucesso",
+    "no_secret": "Coloque client_secret.json na pasta do projeto primeiro.",
+    "privacy_note": "Seus arquivos são salvos em uma pasta 'Steam Curator' no seu Google Drive."
+  },
+  "steam_connect": {
+    "title": "Conta Steam",
+    "desc": "Conecte sua conta para importar sua lista automaticamente.",
+    "btn_connect": "Conectar com Steam",
+    "btn_disconnect": "Desconectar Steam",
+    "btn_import": "⬇ Importar Wishlist da Steam",
+    "connecting": "Abrindo Steam Login no navegador...",
+    "connected": "✓ Conectado como {name}",
+    "not_connected": "Nenhuma conta conectada",
+    "importing": "Importando {n}/{total}...",
+    "import_done": "✓ {added} jogos importados, {skipped} já existentes",
+    "import_error": "Erro ao importar: {msg}",
+    "api_key_label": "Steam Web API Key",
+    "api_key_desc": "Obtenha sua chave em steamcommunity.com/dev/apikey",
+    "disconnect_confirm": "Desconectar conta Steam?"
+  }
+}

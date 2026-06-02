@@ -1,0 +1,218 @@
+{
+  "app": {
+    "name": "Steam Library Curator",
+    "subtitle": "Personal Library"
+  },
+  "nav": {
+    "wishlist": "Wishlist",
+    "dashboard": "Dashboard",
+    "deals": "Deals",
+    "history": "History",
+    "settings": "Settings"
+  },
+  "nav_sections": {
+    "collection": "Collection",
+    "tools": "Tools"
+  },
+  "actions": {
+    "add": "Add game",
+    "edit": "Edit",
+    "delete": "Delete",
+    "save": "Save",
+    "cancel": "Cancel",
+    "refresh": "Refresh prices",
+    "search": "Search game...",
+    "export": "Export Excel"
+  },
+  "filters": {
+    "all": "All",
+    "priority_sa": "S/A",
+    "on_sale": "On sale"
+  },
+  "game": {
+    "name": "Name",
+    "app_id": "Steam AppID",
+    "genre": "Genre",
+    "year": "Year",
+    "developer": "Developer",
+    "publisher": "Publisher",
+    "priority": "Priority",
+    "status": "Status",
+    "price_current": "Current price",
+    "price_low": "All-time low",
+    "price_diff": "Difference",
+    "date_added": "Added on",
+    "notes": "Notes",
+    "rating": "Rating"
+  },
+  "recommendation": {
+    "buy_now": "Buy now",
+    "near_low": "Close to all-time low",
+    "wait": "Wait for sale",
+    "no_data": "No data"
+  },
+  "stats": {
+    "total_games": "Games in wishlist",
+    "total_value": "Current value",
+    "min_value": "At all-time low",
+    "savings": "Sale savings",
+    "priority_s": "Priority S",
+    "on_sale_now": "On sale"
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "priorities": "Priority Distribution",
+    "genres": "Genre Distribution",
+    "decades": "Distribution by Decade",
+    "economic": "Economic Value",
+    "no_data": "Not enough data to display chart"
+  },
+  "deals": {
+    "title": "Deals",
+    "on_sale": "On sale now",
+    "upcoming": "Upcoming sale events",
+    "confirmed": "Confirmed",
+    "estimated": "Estimated",
+    "starts": "Start",
+    "ends": "End",
+    "days_left": "{n} days left",
+    "starts_in": "Starts in {n} days",
+    "no_deals": "None of your wishlist games are on sale right now",
+    "discount": "Discount",
+    "save_amount": "You save",
+    "active_now": "🔥 ACTIVE NOW",
+    "refresh_all": "↻ Refresh all prices",
+    "currency_note": "Prices in {currency} — change in Settings"
+  },
+  "history": {
+    "title": "History",
+    "subtitle": "Recently added games to wishlist",
+    "added_on": "Added on {date}",
+    "empty": "No games in history yet"
+  },
+  "settings": {
+    "title": "Settings",
+    "language": "Language",
+    "language_desc": "Select interface language",
+    "api_key": "SteamGridDB API Key",
+    "api_key_desc": "Required to download cover images",
+    "excel_path": "Excel file path",
+    "save_settings": "Save settings",
+    "saved": "Settings saved successfully",
+    "currency_section": "Country / Currency",
+    "currency_desc": "Determines the currency shown for Steam prices.",
+    "refresh_all": "Refresh all prices",
+    "refreshing": "Updating {n} games...",
+    "refresh_done": "✓ {n} prices updated",
+    "show_key": "👁 Show",
+    "hide_key": "🙈 Hide",
+    "key_saved": "✓ API key saved",
+    "key_missing": "⚠ No API key — covers won't download"
+  },
+  "add_game": {
+    "title": "Add game to Wishlist",
+    "search_appid": "Search by name or AppID",
+    "fetching": "Fetching data...",
+    "cover_fetching": "Downloading cover...",
+    "success": "Game added successfully",
+    "error_not_found": "Game not found on Steam",
+    "error_api": "Error connecting to Steam",
+    "search_btn": "Search",
+    "hint": "Type a name or AppID and press Search",
+    "section_results": "RESULTS",
+    "section_preview": "PREVIEW",
+    "placeholder": "Results will appear here",
+    "searching": "Searching...",
+    "select_hint": "{n} results — click to select",
+    "selected": "✓ {name} — fetching data...",
+    "data_ok": "✓ Data fetched — choose priority and save",
+    "free": "Free"
+  },
+  "priority": {
+    "S": "S — Must buy",
+    "A": "A — Very important",
+    "B": "B — Interesting",
+    "C": "C — Low priority"
+  },
+  "status": {
+    "Wishlist": "Wishlist",
+    "Archivado": "Archived"
+  },
+  "months": {
+    "1": "January",
+    "2": "February",
+    "3": "March",
+    "4": "April",
+    "5": "May",
+    "6": "June",
+    "7": "July",
+    "8": "August",
+    "9": "September",
+    "10": "October",
+    "11": "November",
+    "12": "December"
+  },
+  "detail": {
+    "check_on_steam": "Check on Steam ▶",
+    "retry_cover": "⬇ Retry cover",
+    "refresh_prices": "↻ Refresh prices",
+    "delete_game": "🗑 Remove from wishlist",
+    "base_price": "Base price",
+    "edit_section": "Edit"
+  },
+  "sale_events": {
+    "lunar_new_year": "Lunar New Year Sale",
+    "spring_sale": "Spring Sale",
+    "summer_sale": "Summer Sale",
+    "autumn_sale": "Autumn Sale",
+    "halloween_sale": "Halloween Sale",
+    "black_friday": "Black Friday",
+    "winter_sale": "Winter Sale",
+    "lunar_new_year_2026": "Lunar New Year Sale 2026",
+    "spring_sale_2026": "Spring Sale 2026",
+    "summer_sale_2026": "Summer Sale 2026",
+    "halloween_sale_2026": "Halloween Sale 2026",
+    "black_friday_2026": "Black Friday 2026",
+    "autumn_sale_2026": "Autumn Sale 2026",
+    "winter_sale_2026": "Winter Sale 2026",
+    "lunar_new_year_2027": "Lunar New Year Sale 2027",
+    "spring_sale_2027": "Spring Sale 2027",
+    "summer_sale_2027": "Summer Sale 2027"
+  },
+  "sync": {
+    "title": "Google Drive Sync",
+    "desc": "Save your wishlist and covers to your personal Google Drive. Your data never passes through our servers.",
+    "status_ok": "✓ Connected to Google Drive",
+    "status_no_token": "Not signed in — click Connect",
+    "status_no_file": "⚠ Missing client_secret.json in project folder",
+    "btn_connect": "Connect with Google",
+    "btn_disconnect": "Disconnect",
+    "btn_upload": "⬆ Upload to Drive",
+    "btn_download": "⬇ Download from Drive",
+    "uploading": "Uploading {file}...",
+    "downloading": "Downloading {file}...",
+    "upload_done": "✓ {n} files uploaded",
+    "download_done": "✓ {n} files downloaded",
+    "error": "Error: {msg}",
+    "connecting": "Opening browser to authenticate...",
+    "connect_done": "✓ Connected successfully",
+    "no_secret": "Place client_secret.json in the project folder first.",
+    "privacy_note": "Your files are saved in a 'Steam Curator' folder in your own Google Drive."
+  },
+  "steam_connect": {
+    "title": "Steam Account",
+    "desc": "Connect your account to automatically import your wishlist.",
+    "btn_connect": "Connect with Steam",
+    "btn_disconnect": "Disconnect Steam",
+    "btn_import": "⬇ Import Steam Wishlist",
+    "connecting": "Opening Steam Login in browser...",
+    "connected": "✓ Connected as {name}",
+    "not_connected": "No account connected",
+    "importing": "Importing {n}/{total}...",
+    "import_done": "✓ {added} games imported, {skipped} already in list",
+    "import_error": "Import error: {msg}",
+    "api_key_label": "Steam Web API Key",
+    "api_key_desc": "Get your free key at steamcommunity.com/dev/apikey",
+    "disconnect_confirm": "Disconnect Steam account?"
+  }
+}

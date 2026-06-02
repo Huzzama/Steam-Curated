@@ -1,0 +1,30 @@
+# Secrets — NUNCA subir
+client_secret.json
+token.json
+settings.json
+*.json
+
+# Excepciones — estos JSON sí deben subir
+!locales/**/*.json
+!data/models_schema.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Data generada en runtime
+wishlist.json
+purchases.json
+assets/covers/
+
+# macOS
+.DS_Store
+
+# Build
+dist/
+build/
+*.spec.bak

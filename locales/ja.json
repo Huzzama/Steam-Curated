@@ -1,0 +1,218 @@
+{
+  "app": {
+    "name": "Steam Library Curator",
+    "subtitle": "個人ライブラリ"
+  },
+  "nav": {
+    "wishlist": "ウィッシュリスト",
+    "dashboard": "ダッシュボード",
+    "deals": "セール",
+    "history": "履歴",
+    "settings": "設定"
+  },
+  "nav_sections": {
+    "collection": "コレクション",
+    "tools": "ツール"
+  },
+  "actions": {
+    "add": "ゲームを追加",
+    "edit": "編集",
+    "delete": "削除",
+    "save": "保存",
+    "cancel": "キャンセル",
+    "refresh": "価格を更新",
+    "search": "ゲームを検索...",
+    "export": "Excelに書き出す"
+  },
+  "filters": {
+    "all": "すべて",
+    "priority_sa": "S/A",
+    "on_sale": "セール中"
+  },
+  "game": {
+    "name": "名前",
+    "app_id": "Steam AppID",
+    "genre": "ジャンル",
+    "year": "年",
+    "developer": "開発者",
+    "publisher": "パブリッシャー",
+    "priority": "優先度",
+    "status": "ステータス",
+    "price_current": "現在の価格",
+    "price_low": "最安値",
+    "price_diff": "差額",
+    "date_added": "追加日",
+    "notes": "メモ",
+    "rating": "評価"
+  },
+  "recommendation": {
+    "buy_now": "今すぐ購入",
+    "near_low": "最安値に近い",
+    "wait": "セールを待つ",
+    "no_data": "データなし"
+  },
+  "stats": {
+    "total_games": "ウィッシュリスト数",
+    "total_value": "現在の合計",
+    "min_value": "最安値合計",
+    "savings": "セール節約額",
+    "priority_s": "優先度S",
+    "on_sale_now": "セール中"
+  },
+  "dashboard": {
+    "title": "ダッシュボード",
+    "priorities": "優先度別分布",
+    "genres": "ジャンル別分布",
+    "decades": "年代別分布",
+    "economic": "経済的価値",
+    "no_data": "グラフを表示するデータが不足しています"
+  },
+  "deals": {
+    "title": "セール",
+    "on_sale": "セール中",
+    "upcoming": "今後のセールイベント",
+    "confirmed": "確定",
+    "estimated": "予定",
+    "starts": "開始",
+    "ends": "終了",
+    "days_left": "残り{n}日",
+    "starts_in": "{n}日後開始",
+    "no_deals": "ウィッシュリストのゲームは現在セール中ではありません",
+    "discount": "割引",
+    "save_amount": "節約額",
+    "active_now": "🔥 開催中",
+    "refresh_all": "↻ 全価格を更新",
+    "currency_note": "価格: {currency} — 設定で変更可"
+  },
+  "history": {
+    "title": "履歴",
+    "subtitle": "最近ウィッシュリストに追加されたゲーム",
+    "added_on": "{date}に追加",
+    "empty": "履歴はまだありません"
+  },
+  "settings": {
+    "title": "設定",
+    "language": "言語",
+    "language_desc": "インターフェース言語を選択",
+    "api_key": "SteamGridDB APIキー",
+    "api_key_desc": "カバー画像のダウンロードに必要",
+    "excel_path": "Excelファイルのパス",
+    "save_settings": "設定を保存",
+    "saved": "設定を保存しました",
+    "currency_section": "国 / 通貨",
+    "currency_desc": "Steamの価格に使用する通貨を決定します。",
+    "refresh_all": "全価格を更新",
+    "refreshing": "{n}件を更新中...",
+    "refresh_done": "✓ {n}件更新完了",
+    "show_key": "👁 表示",
+    "hide_key": "🙈 非表示",
+    "key_saved": "✓ APIキー保存済み",
+    "key_missing": "⚠ APIキーなし — カバーはダウンロードされません"
+  },
+  "add_game": {
+    "title": "ウィッシュリストにゲームを追加",
+    "search_appid": "名前またはAppIDで検索",
+    "fetching": "データを取得中...",
+    "cover_fetching": "カバーをダウンロード中...",
+    "success": "ゲームを追加しました",
+    "error_not_found": "Steamでゲームが見つかりません",
+    "error_api": "Steamへの接続エラー",
+    "search_btn": "検索",
+    "hint": "名前またはAppIDを入力して検索",
+    "section_results": "検索結果",
+    "section_preview": "プレビュー",
+    "placeholder": "結果がここに表示されます",
+    "searching": "検索中...",
+    "select_hint": "{n}件 — クリックして選択",
+    "selected": "✓ {name} — データを取得中...",
+    "data_ok": "✓ データ取得完了 — 優先度を選んで保存",
+    "free": "無料"
+  },
+  "priority": {
+    "S": "S — 必須購入",
+    "A": "A — 非常に重要",
+    "B": "B — 興味あり",
+    "C": "C — 低優先度"
+  },
+  "status": {
+    "Wishlist": "ウィッシュリスト",
+    "Archivado": "アーカイブ"
+  },
+  "months": {
+    "1": "1月",
+    "2": "2月",
+    "3": "3月",
+    "4": "4月",
+    "5": "5月",
+    "6": "6月",
+    "7": "7月",
+    "8": "8月",
+    "9": "9月",
+    "10": "10月",
+    "11": "11月",
+    "12": "12月"
+  },
+  "detail": {
+    "check_on_steam": "Steamで確認 ▶",
+    "retry_cover": "⬇ カバー再取得",
+    "refresh_prices": "↻ 価格を更新",
+    "delete_game": "🗑 ウィッシュリストから削除",
+    "base_price": "定価",
+    "edit_section": "編集"
+  },
+  "sale_events": {
+    "lunar_new_year": "旧正月セール",
+    "spring_sale": "春のセール",
+    "summer_sale": "サマーセール",
+    "autumn_sale": "秋のセール",
+    "halloween_sale": "ハロウィンセール",
+    "black_friday": "ブラックフライデー",
+    "winter_sale": "ウィンターセール",
+    "lunar_new_year_2026": "旧正月セール 2026",
+    "spring_sale_2026": "春のセール 2026",
+    "summer_sale_2026": "サマーセール 2026",
+    "halloween_sale_2026": "ハロウィンセール 2026",
+    "black_friday_2026": "ブラックフライデー 2026",
+    "autumn_sale_2026": "秋のセール 2026",
+    "winter_sale_2026": "ウィンターセール 2026",
+    "lunar_new_year_2027": "旧正月セール 2027",
+    "spring_sale_2027": "春のセール 2027",
+    "summer_sale_2027": "サマーセール 2027"
+  },
+  "sync": {
+    "title": "Google Drive同期",
+    "desc": "ウィッシュリストとカバーを個人のGoogle Driveに保存します。",
+    "status_ok": "✓ Google Driveに接続済み",
+    "status_no_token": "未接続 — 接続ボタンをクリック",
+    "status_no_file": "⚠ client_secret.jsonがありません",
+    "btn_connect": "Googleで接続",
+    "btn_disconnect": "切断",
+    "btn_upload": "⬆ Driveにアップロード",
+    "btn_download": "⬇ Driveからダウンロード",
+    "uploading": "{file}をアップロード中...",
+    "downloading": "{file}をダウンロード中...",
+    "upload_done": "✓ {n}ファイルをアップロード",
+    "download_done": "✓ {n}ファイルをダウンロード",
+    "error": "エラー: {msg}",
+    "connecting": "ブラウザで認証中...",
+    "connect_done": "✓ 接続しました",
+    "no_secret": "まずclient_secret.jsonを配置してください。",
+    "privacy_note": "ファイルはあなた自身のGoogle Driveに保存されます。"
+  },
+  "steam_connect": {
+    "title": "Steamアカウント",
+    "desc": "アカウントを接続してウィッシュリストを自動インポート。",
+    "btn_connect": "Steamで接続",
+    "btn_disconnect": "Steam接続を解除",
+    "btn_import": "⬇ SteamウィッシュリストをインポートSteam",
+    "connecting": "ブラウザでSteamログインを開いています...",
+    "connected": "✓ {name}として接続済み",
+    "not_connected": "未接続",
+    "importing": "{n}/{total}をインポート中...",
+    "import_done": "✓ {added}件インポート、{skipped}件スキップ",
+    "import_error": "インポートエラー: {msg}",
+    "api_key_label": "Steam Web APIキー",
+    "api_key_desc": "steamcommunity.com/dev/apikeyで無料取得",
+    "disconnect_confirm": "Steam接続を解除しますか？"
+  }
+}
