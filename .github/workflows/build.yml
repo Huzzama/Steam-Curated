@@ -1,0 +1,223 @@
+name: Build Steam Curator
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+
+  # ── macOS ────────────────────────────────────────────────────────────────────
+  build-macos:
+    name: macOS (.app + .dmg)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build
+        run: pyinstaller packaging/build.spec --clean --noconfirm
+
+      - name: Create DMG
+        run: |
+          hdiutil create \
+            -volname "Steam Curator" \
+            -srcfolder "dist/Steam Curator.app" \
+            -ov -format UDZO \
+            "dist/SteamCurator-macOS.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/SteamCurator-macOS.dmg
+          retention-days: 7
+
+  # ── Windows ──────────────────────────────────────────────────────────────────
+  build-windows:
+    name: Windows (.exe zip)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build
+        run: pyinstaller packaging/build.spec --clean --noconfirm
+
+      - name: Zip
+        run: |
+          Compress-Archive `
+            -Path dist/SteamCurator `
+            -DestinationPath dist/SteamCurator-Windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: dist/SteamCurator-Windows.zip
+          retention-days: 7
+
+  # ── Linux AppImage ────────────────────────────────────────────────────────────
+  build-linux:
+    name: Linux (AppImage)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk tk-dev libfuse2 fuse
+
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build binary
+        run: pyinstaller packaging/build.spec --clean --noconfirm
+
+      - name: Download appimagetool
+        run: |
+          wget -q \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
+            -O /usr/local/bin/appimagetool
+          chmod +x /usr/local/bin/appimagetool
+
+      - name: Build AppImage
+        run: |
+          # AppDir skeleton
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+          cp -r dist/SteamCurator/* AppDir/usr/bin/
+
+          # Desktop entry
+          cat > AppDir/SteamCurator.desktop << 'DESKTOP'
+          [Desktop Entry]
+          Name=Steam Curator
+          Exec=SteamCurator
+          Icon=steamcurator
+          Type=Application
+          Categories=Game;Utility;
+          DESKTOP
+
+          # AppRun
+          cat > AppDir/AppRun << 'APPRUN'
+          #!/bin/bash
+          exec "$APPDIR/usr/bin/SteamCurator" "$@"
+          APPRUN
+          chmod +x AppDir/AppRun
+
+          # Icon
+          if [ -f assets/icon.png ]; then
+            cp assets/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/steamcurator.png
+            cp assets/icon.png AppDir/steamcurator.png
+          else
+            # Create minimal placeholder icon
+            python3 -c "
+          from PIL import Image, ImageDraw
+          img = Image.new('RGBA', (256,256), (9,9,11,255))
+          d = ImageDraw.Draw(img)
+          d.ellipse([64,64,192,192], fill=(96,165,250,255))
+          img.save('AppDir/steamcurator.png')
+          AppDir/usr/share/icons/hicolor/256x256/apps/steamcurator.png"
+            python3 -c "
+          from PIL import Image, ImageDraw
+          img = Image.new('RGBA', (256,256), (9,9,11,255))
+          d = ImageDraw.Draw(img)
+          d.ellipse([64,64,192,192], fill=(96,165,250,255))
+          img.save('AppDir/steamcurator.png')
+          import shutil; shutil.copy('AppDir/steamcurator.png', 'AppDir/usr/share/icons/hicolor/256x256/apps/steamcurator.png')
+          "
+          fi
+
+          ARCH=x86_64 appimagetool AppDir dist/SteamCurator-Linux.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist/SteamCurator-Linux.AppImage
+          retention-days: 7
+
+  # ── GitHub Release ────────────────────────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Steam Curator ${{ steps.version.outputs.VERSION }}"
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## Steam Curator ${{ steps.version.outputs.VERSION }}
+
+            Personal Steam wishlist manager with smart buy recommendations,
+            bulk cover downloads, spending dashboard, and Google Drive sync.
+
+            ---
+
+            ### Downloads
+
+            | Platform | File | Requirements |
+            |----------|------|--------------|
+            | 🍎 macOS | `SteamCurator-macOS.dmg` | macOS 10.13+ |
+            | 🪟 Windows | `SteamCurator-Windows.zip` | Windows 10+ |
+            | 🐧 Linux | `SteamCurator-Linux.AppImage` | x86_64 |
+
+            ### Installation
+
+            **macOS:** Open DMG → drag to Applications.
+            **Windows:** Extract ZIP → run `SteamCurator.exe`.
+            **Linux:** `chmod +x SteamCurator-Linux.AppImage && ./SteamCurator-Linux.AppImage`
+
+            ### Connect to SteamKustom
+
+            1. Create account at [steamkustom.com](https://steamkustom.com)
+            2. Go to Settings → Apps → Generate Token
+            3. Paste token in Steam Curator → Settings → SteamKustom Account
+          files: |
+            artifacts/macos-dmg/SteamCurator-macOS.dmg
+            artifacts/windows-zip/SteamCurator-Windows.zip
+            artifacts/linux-appimage/SteamCurator-Linux.AppImage
+          draft: false
+          prerelease: false
