@@ -19,7 +19,7 @@ def load_settings() -> dict:
         "steam_api_key":      "",
         "steam_id64":         "",
         "steam_name":         "",
-        "steamkustom_token":  "",   # JWT from steamkustom.com login
+        "pimpmysteam_token":  "",   # JWT from pimpmysteam.com login
         "api_url":            "https://steamkustom-production.up.railway.app",
     }
 
@@ -325,12 +325,12 @@ class SettingsView(ctk.CTkFrame):
             width=280, height=36,
         ).pack(anchor="w")
 
-        # ── SteamKustom Account ──────────────────────────────────
-        self._section(content, "SteamKustom Account")
+        # ── PimpMySteam Account ──────────────────────────────────
+        self._section(content, "PimpMySteam Account")
 
         ctk.CTkLabel(
             content,
-            text="Generate a token at steamkustom.com → Settings → Apps. "
+            text="Generate a token at pimpmysteam.com → Settings → Apps. "
                  "Paste it here to enable Drive sync and Steam wishlist import.",
             font=ctk.CTkFont(size=11),
             text_color=COLORS["text_dim"],
@@ -340,7 +340,7 @@ class SettingsView(ctk.CTkFrame):
         token_row = ctk.CTkFrame(content, fg_color="transparent")
         token_row.pack(fill="x", pady=(0, 4))
 
-        current_token = self._settings.get("steamkustom_token", "")
+        current_token = self._settings.get("pimpmysteam_token", "")
         self._sk_token_var = ctk.StringVar(value=current_token)
         self._sk_token_entry = ctk.CTkEntry(
             token_row,
@@ -375,7 +375,7 @@ class SettingsView(ctk.CTkFrame):
 
         ctk.CTkLabel(
             content,
-            text="steamkustom.com → Settings → Apps → Generate Token",
+            text="pimpmysteam.com → Settings → Apps → Generate Token",
             font=ctk.CTkFont(size=9),
             text_color=COLORS["text_dim"],
         ).pack(anchor="w", pady=(0, 8))
@@ -409,7 +409,7 @@ class SettingsView(ctk.CTkFrame):
     # ── Helpers ───────────────────────────────────────────────────
 
     def _verify_sk_token(self):
-        """Verify the SteamKustom token and save if valid."""
+        """Verify the PimpMySteam token and save if valid."""
         token = self._sk_token_var.get().strip()
         if not token:
             self._sk_status_lbl.configure(
@@ -420,15 +420,15 @@ class SettingsView(ctk.CTkFrame):
 
         import threading
         def _check():
-            from services.steamkustom_auth import verify_token
+            from services.pimpmysteam_auth import verify_token
             user = verify_token(token)
             def _update():
                 if user:
                     from ui.settings_loader import load_settings, save_settings
                     s = load_settings()
-                    s["steamkustom_token"] = token
+                    s["pimpmysteam_token"] = token
                     save_settings(s)
-                    self._settings["steamkustom_token"] = token
+                    self._settings["pimpmysteam_token"] = token
                     self._sk_token_entry.configure(show="•")
                     self._sk_status_lbl.configure(
                         text=f"✓ {user.get('username', 'Connected')}",

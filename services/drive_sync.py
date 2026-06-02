@@ -1,98 +1,104 @@
 """
-Google Drive sync for Steam Grunge Editor.
+Google Drive sync — works in two modes:
 
-Syncs:
-  - exports/   → all exported artwork (cover, wide, hero, logo, icon)
-  - data/      → presets and project files (.sgeproj)
+MODE A — Via PimpMySteam API (preferred, zero local setup)
+  User logs in at pimpmysteam.com, connects Google there.
+  App calls /google/drive-token with its JWT to get an access token.
+  No client_secret.json needed locally.
 
-Credentials:
-  - client_secret.json  → place in project root (next to requirements.txt)
-  - token.json          → auto-created after first auth, same location
+MODE B — Local OAuth (fallback, for dev / self-hosted)
+  Requires client_secret.json in the project root.
+  Opens browser for OAuth on first run.
 """
 import io
-import os
+import json
 import threading
 from pathlib import Path
 from typing import Optional, Callable
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-_BASE_DIR          = Path(__file__).resolve().parents[2]   # project root
-CLIENT_SECRET_PATH = _BASE_DIR / "client_secret.json"
-TOKEN_PATH         = _BASE_DIR / "token.json"
+from config import BASE_DIR
 
-# Sync what lives in user data dir
-from app.config import EXPORT_FOLDER, DATA_DIR, PRESETS_FOLDER
+CLIENT_SECRET_PATH = BASE_DIR / "client_secret.json"
+TOKEN_PATH         = BASE_DIR / "token.json"
+SETTINGS_PATH      = BASE_DIR / "settings.json"
 
-EXPORT_DIR   = Path(EXPORT_FOLDER)
-DATA_DIR_P   = Path(DATA_DIR)
-
-SCOPES          = ["https://www.googleapis.com/auth/drive.file"]
-DRIVE_ROOT_NAME = "Steam Grunge Editor"
-
-_API_URL = "https://steamkustom-production.up.railway.app"
-_PREFS_FILE = _BASE_DIR / "app" / "data" / "preferences.json"
+SCOPES            = ["https://www.googleapis.com/auth/drive.file"]
+DRIVE_FOLDER_NAME = "Steam Curator"
+SYNC_FILES        = ["wishlist.json", "settings.json", "purchases.json"]
 
 
-def _get_steamkustom_token() -> Optional[str]:
-    """Return JWT if user linked their SteamKustom account."""
-    import json
+# ── Auth mode detection ───────────────────────────────────────────────────────
+
+def _get_pimpmysteam_token() -> Optional[str]:
+    """Return JWT from settings.json if user logged in via pimpmysteam.com."""
     try:
-        if _PREFS_FILE.exists():
-            with open(_PREFS_FILE) as f:
-                return json.load(f).get("steamkustom_token")
+        if SETTINGS_PATH.exists():
+            with open(SETTINGS_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("pimpmysteam_token")
     except Exception:
         pass
     return None
+
+
+def _get_api_url() -> str:
+    try:
+        if SETTINGS_PATH.exists():
+            with open(SETTINGS_PATH) as f:
+                data = json.load(f)
+            return data.get("api_url", "https://steamkustom-production.up.railway.app")
+    except Exception:
+        pass
+    return "https://steamkustom-production.up.railway.app"
 
 
 def _fetch_drive_token_from_api() -> Optional[str]:
-    """Get Google access token from SteamKustom backend using JWT."""
-    import requests as _req
-    jwt = _get_steamkustom_token()
+    """Ask our backend for a Google Drive access token using the user's JWT."""
+    import requests
+    jwt    = _get_pimpmysteam_token()
     if not jwt:
         return None
     try:
-        r = _req.get(f"{_API_URL}/google/drive-token",
-                     headers={"Authorization": f"Bearer {jwt}"}, timeout=10)
-        if r.status_code == 200:
-            return r.json().get("access_token")
+        resp = requests.get(
+            f"{_get_api_url()}/google/drive-token",
+            headers={"Authorization": f"Bearer {jwt}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("access_token")
     except Exception:
         pass
     return None
-DRIVE_EXPORTS   = "exports"
-DRIVE_PRESETS   = "presets"
-
-EXPORT_EXTS  = {".png", ".jpg", ".jpeg", ".webp"}
-PRESET_EXTS  = {".sgeproj", ".json"}
 
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
+# ── Credentials ───────────────────────────────────────────────────────────────
 
 def is_configured() -> bool:
-    return bool(_get_steamkustom_token()) or CLIENT_SECRET_PATH.exists()
+    """True if either mode is available."""
+    return bool(_get_pimpmysteam_token()) or CLIENT_SECRET_PATH.exists()
 
 
 def is_authenticated() -> bool:
-    if _get_steamkustom_token():
+    # Mode A: check if API token fetch works
+    if _get_pimpmysteam_token():
         return bool(_fetch_drive_token_from_api())
-    if not TOKEN_PATH.exists():
-        return False
-    try:
-        from google.oauth2.credentials import Credentials
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
-        return creds and (creds.valid or bool(creds.refresh_token))
-    except Exception:
-        return False
+    # Mode B: local token
+    if TOKEN_PATH.exists():
+        try:
+            from google.oauth2.credentials import Credentials
+            creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+            return creds and (creds.valid or bool(creds.refresh_token))
+        except Exception:
+            pass
+    return False
 
 
 def authenticate(on_done: Callable[[bool, str], None] = None):
-    """Open browser for OAuth. Calls on_done(success, message) when finished."""
     def _run():
         try:
             creds = _load_or_refresh()
-            msg   = "Connected to Google Drive" if creds else "Authentication failed"
             if on_done:
-                on_done(bool(creds), msg)
+                on_done(bool(creds), "Connected to Google Drive" if creds else "Auth failed")
         except Exception as e:
             if on_done:
                 on_done(False, str(e))
@@ -105,7 +111,8 @@ def disconnect():
 
 
 def _load_or_refresh():
-    # Mode A: API token from SteamKustom
+    """Get credentials — prefers API token, falls back to local OAuth."""
+    # Mode A: get access token from our API
     api_token = _fetch_drive_token_from_api()
     if api_token:
         from google.oauth2.credentials import Credentials
@@ -137,7 +144,7 @@ def _service():
     return build("drive", "v3", credentials=_load_or_refresh())
 
 
-# ── Drive helpers ─────────────────────────────────────────────────────────────
+# ── Drive helpers (unchanged) ─────────────────────────────────────────────────
 
 def _get_or_create_folder(svc, name: str, parent_id: str = None) -> str:
     q = (f"name='{name}' and mimeType='application/vnd.google-apps.folder'"
@@ -162,12 +169,9 @@ def _find_file(svc, name: str, parent_id: str) -> Optional[str]:
 
 def _mime(path: Path) -> str:
     return {
-        ".png":     "image/png",
-        ".jpg":     "image/jpeg",
-        ".jpeg":    "image/jpeg",
-        ".webp":    "image/webp",
-        ".sgeproj": "application/json",
-        ".json":    "application/json",
+        ".json": "application/json",
+        ".png":  "image/png",
+        ".jpg":  "image/jpeg",
     }.get(path.suffix.lower(), "application/octet-stream")
 
 
@@ -192,7 +196,6 @@ def _download_file(svc, file_id: str, dest: Path):
     done    = False
     while not done:
         _, done = dl.next_chunk()
-    dest.parent.mkdir(parents=True, exist_ok=True)
     with open(dest, "wb") as f:
         f.write(buf.getvalue())
 
@@ -200,103 +203,54 @@ def _download_file(svc, file_id: str, dest: Path):
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def upload_all(on_progress: Callable[[str], None] = None) -> dict:
-    """
-    Upload all exports and presets to Drive.
-    Returns {"uploaded": n, "errors": [...]}.
-    """
     uploaded, errors = 0, []
     try:
-        svc      = _service()
-        root_id  = _get_or_create_folder(svc, DRIVE_ROOT_NAME)
-        exp_id   = _get_or_create_folder(svc, DRIVE_EXPORTS, root_id)
-        pre_id   = _get_or_create_folder(svc, DRIVE_PRESETS,  root_id)
-
-        # Exports — walk all subfolders (cover/, wide/, hero/, etc.)
-        if EXPORT_DIR.exists():
-            for f in sorted(EXPORT_DIR.rglob("*")):
-                if f.is_file() and f.suffix.lower() in EXPORT_EXTS:
-                    try:
-                        if on_progress:
-                            on_progress(f"Uploading {f.name}…")
-                        _upload_file(svc, f, exp_id)
-                        uploaded += 1
-                    except Exception as e:
-                        errors.append(f"{f.name}: {e}")
-
-        # Presets / project files
-        if DATA_DIR_P.exists():
-            for f in sorted(DATA_DIR_P.rglob("*")):
-                if f.is_file() and f.suffix.lower() in PRESET_EXTS:
-                    try:
-                        if on_progress:
-                            on_progress(f"Uploading {f.name}…")
-                        _upload_file(svc, f, pre_id)
-                        uploaded += 1
-                    except Exception as e:
-                        errors.append(f"{f.name}: {e}")
-
+        svc       = _service()
+        folder_id = _get_or_create_folder(svc, DRIVE_FOLDER_NAME)
+        for filename in SYNC_FILES:
+            path = BASE_DIR / filename
+            if not path.exists():
+                continue
+            try:
+                if on_progress:
+                    on_progress(f"Uploading {filename}…")
+                _upload_file(svc, path, folder_id)
+                uploaded += 1
+            except Exception as e:
+                errors.append(f"{filename}: {e}")
     except Exception as e:
         errors.append(f"Error: {e}")
-
     return {"uploaded": uploaded, "errors": errors}
 
 
 def download_all(on_progress: Callable[[str], None] = None) -> dict:
-    """
-    Download exports and presets from Drive to local folders.
-    Skips files that already exist locally.
-    """
     downloaded, errors = 0, []
     try:
         svc = _service()
-
-        q       = (f"name='{DRIVE_ROOT_NAME}' and "
-                   f"mimeType='application/vnd.google-apps.folder' and trashed=false")
+        q   = (f"name='{DRIVE_FOLDER_NAME}' and "
+               f"mimeType='application/vnd.google-apps.folder' and trashed=false")
         folders = svc.files().list(q=q, fields="files(id)").execute().get("files", [])
         if not folders:
             return {"downloaded": 0, "errors": ["No Drive folder found. Upload first."]}
-
-        root_id = folders[0]["id"]
-
-        for subfolder_name, local_dir, allowed_exts in [
-            (DRIVE_EXPORTS, EXPORT_DIR,   EXPORT_EXTS),
-            (DRIVE_PRESETS, DATA_DIR_P,   PRESET_EXTS),
-        ]:
-            q2 = (f"name='{subfolder_name}' and '{root_id}' in parents and "
-                  f"mimeType='application/vnd.google-apps.folder' and trashed=false")
-            r2 = svc.files().list(q=q2, fields="files(id)").execute()
-            if not r2.get("files"):
+        folder_id = folders[0]["id"]
+        for filename in SYNC_FILES:
+            file_id = _find_file(svc, filename, folder_id)
+            if not file_id:
                 continue
-
-            sub_id = r2["files"][0]["id"]
-            files  = svc.files().list(
-                q=f"'{sub_id}' in parents and trashed=false",
-                fields="files(id, name)",
-            ).execute().get("files", [])
-
-            for file in files:
-                ext  = Path(file["name"]).suffix.lower()
-                if ext not in allowed_exts:
-                    continue
-                dest = local_dir / file["name"]
-                if dest.exists():
-                    continue
-                try:
-                    if on_progress:
-                        on_progress(f"Downloading {file['name']}…")
-                    _download_file(svc, file["id"], dest)
-                    downloaded += 1
-                except Exception as e:
-                    errors.append(f"{file['name']}: {e}")
-
+            try:
+                if on_progress:
+                    on_progress(f"Downloading {filename}…")
+                _download_file(svc, file_id, BASE_DIR / filename)
+                downloaded += 1
+            except Exception as e:
+                errors.append(f"{filename}: {e}")
     except Exception as e:
         errors.append(f"Error: {e}")
-
     return {"downloaded": downloaded, "errors": errors}
 
 
-def get_status() -> dict:
-    jwt = _get_steamkustom_token()
+def get_sync_status() -> dict:
+    jwt = _get_pimpmysteam_token()
     return {
         "configured":    is_configured(),
         "authenticated": is_authenticated(),
