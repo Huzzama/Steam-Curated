@@ -19,7 +19,7 @@ def load_settings() -> dict:
         "steam_api_key":      "",
         "steam_id64":         "",
         "steam_name":         "",
-        "pimpmysteam_token":  "",   # JWT from pimpmysteam.com login
+        "steamkustom_token":  "",   # JWT from pimpmysteam.com login
         "api_url":            "https://steamkustom-production.up.railway.app",
     }
 
@@ -340,7 +340,7 @@ class SettingsView(ctk.CTkFrame):
         token_row = ctk.CTkFrame(content, fg_color="transparent")
         token_row.pack(fill="x", pady=(0, 4))
 
-        current_token = self._settings.get("pimpmysteam_token", "")
+        current_token = self._settings.get("steamkustom_token", "")
         self._sk_token_var = ctk.StringVar(value=current_token)
         self._sk_token_entry = ctk.CTkEntry(
             token_row,
@@ -420,15 +420,15 @@ class SettingsView(ctk.CTkFrame):
 
         import threading
         def _check():
-            from services.pimpmysteam_auth import verify_token
+            from services.steamkustom_auth import verify_token
             user = verify_token(token)
             def _update():
                 if user:
                     from ui.settings_loader import load_settings, save_settings
                     s = load_settings()
-                    s["pimpmysteam_token"] = token
+                    s["steamkustom_token"] = token
                     save_settings(s)
-                    self._settings["pimpmysteam_token"] = token
+                    self._settings["steamkustom_token"] = token
                     self._sk_token_entry.configure(show="•")
                     self._sk_status_lbl.configure(
                         text=f"✓ {user.get('username', 'Connected')}",

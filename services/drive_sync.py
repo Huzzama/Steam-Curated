@@ -29,13 +29,13 @@ SYNC_FILES        = ["wishlist.json", "settings.json", "purchases.json"]
 
 # ── Auth mode detection ───────────────────────────────────────────────────────
 
-def _get_pimpmysteam_token() -> Optional[str]:
+def _get_steamkustom_token() -> Optional[str]:
     """Return JWT from settings.json if user logged in via pimpmysteam.com."""
     try:
         if SETTINGS_PATH.exists():
             with open(SETTINGS_PATH, encoding="utf-8") as f:
                 data = json.load(f)
-            return data.get("pimpmysteam_token")
+            return data.get("steamkustom_token")
     except Exception:
         pass
     return None
@@ -55,7 +55,7 @@ def _get_api_url() -> str:
 def _fetch_drive_token_from_api() -> Optional[str]:
     """Ask our backend for a Google Drive access token using the user's JWT."""
     import requests
-    jwt    = _get_pimpmysteam_token()
+    jwt    = _get_steamkustom_token()
     if not jwt:
         return None
     try:
@@ -75,12 +75,12 @@ def _fetch_drive_token_from_api() -> Optional[str]:
 
 def is_configured() -> bool:
     """True if either mode is available."""
-    return bool(_get_pimpmysteam_token()) or CLIENT_SECRET_PATH.exists()
+    return bool(_get_steamkustom_token()) or CLIENT_SECRET_PATH.exists()
 
 
 def is_authenticated() -> bool:
     # Mode A: check if API token fetch works
-    if _get_pimpmysteam_token():
+    if _get_steamkustom_token():
         return bool(_fetch_drive_token_from_api())
     # Mode B: local token
     if TOKEN_PATH.exists():
@@ -250,7 +250,7 @@ def download_all(on_progress: Callable[[str], None] = None) -> dict:
 
 
 def get_sync_status() -> dict:
-    jwt = _get_pimpmysteam_token()
+    jwt = _get_steamkustom_token()
     return {
         "configured":    is_configured(),
         "authenticated": is_authenticated(),
