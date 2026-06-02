@@ -1,6 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec for Steam Curator
-# Usage: pyinstaller packaging/build.spec
 
 import sys
 from pathlib import Path
@@ -14,26 +13,30 @@ a = Analysis(
     pathex=[str(ROOT)],
     binaries=[],
     datas=[
-        # Include locale files
         (str(ROOT / 'locales'), 'locales'),
-        # Include assets (covers are excluded — too large, generated at runtime)
+        (str(ROOT / 'assets' / 'fonts'), 'assets/fonts')
+        if (ROOT / 'assets' / 'fonts').exists() else
+        (str(ROOT / 'assets'), 'assets'),
     ],
     hiddenimports=[
         'customtkinter',
         'PIL._tkinter_finder',
-        'PIL.Image', 'PIL.ImageDraw', 'PIL.ImageFilter',
-        'matplotlib.backends.backend_tkagg',
+        'PIL.Image', 'PIL.ImageDraw', 'PIL.ImageFilter', 'PIL.ImageFont',
+        'matplotlib', 'matplotlib.backends.backend_tkagg',
+        'matplotlib.backends.backend_agg',
         'google.auth', 'google.auth.transport.requests',
         'google.oauth2.credentials',
         'google_auth_oauthlib.flow',
         'googleapiclient.discovery',
         'googleapiclient.http',
-        'requests',
-        'i18n',
+        'requests', 'requests.packages.urllib3',
+        'i18n', 'i18n.loaders',
+        'openpyxl', 'pandas', 'bs4',
+        'jose', 'jose.jwt',
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=['test', 'tests', 'pytest'],
+    excludes=['pytest', 'test', 'tests', 'tkinter.test'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -52,8 +55,9 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,          # No terminal window on Windows
-    icon=str(ROOT / 'assets' / 'icon.ico') if (ROOT / 'assets' / 'icon.ico').exists() else None,
+    console=False,
+    icon=str(ROOT / 'assets' / 'icon.ico')
+        if (ROOT / 'assets' / 'icon.ico').exists() else None,
 )
 
 coll = COLLECT(
@@ -67,18 +71,21 @@ coll = COLLECT(
     name='SteamCurator',
 )
 
-# macOS .app bundle
 if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
         name='Steam Curator.app',
-        icon=str(ROOT / 'assets' / 'icon.icns') if (ROOT / 'assets' / 'icon.icns').exists() else None,
+        icon=str(ROOT / 'assets' / 'icon.icns')
+            if (ROOT / 'assets' / 'icon.icns').exists() else None,
         bundle_identifier='com.steamkustom.curator',
         info_plist={
             'NSPrincipalClass': 'NSApplication',
             'NSAppleScriptEnabled': False,
-            'CFBundleDocumentTypes': [],
             'LSMinimumSystemVersion': '10.13.0',
             'NSHighResolutionCapable': True,
+            'CFBundleName': 'Steam Curator',
+            'CFBundleDisplayName': 'Steam Curator',
+            'CFBundleVersion': '1.0.0',
+            'CFBundleShortVersionString': '1.0.0',
         },
     )
