@@ -11,21 +11,40 @@ permissions:
 
 jobs:
 
+  # ── macOS ────────────────────────────────────────────────────────────────────
   build-macos:
     name: macOS (.app + .dmg)
-    runs-on: macos-latest
+    runs-on: macos-13       # macOS 13 Ventura — more stable for tkinter/customtkinter
+
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Python with tkinter via Homebrew
+        run: |
+          brew install python-tk@3.11 || true
+          brew install python@3.11 || true
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+
       - name: Install deps
         run: |
-          pip install --upgrade pip pyinstaller
+          pip install --upgrade pip
+          pip install pyinstaller
           pip install -r requirements.txt
-      - name: Build
+          # Ensure tkinter is importable
+          python -c "import tkinter; print('tkinter OK')"
+          python -c "import customtkinter; print('customtkinter OK')"
+
+      - name: Build .app
         run: pyinstaller packaging/build.spec --clean --noconfirm
+
+      - name: Fix macOS permissions
+        run: |
+          chmod -R 755 "dist/Steam Curator.app"
+          xattr -cr "dist/Steam Curator.app" || true
+
       - name: Create DMG
         run: |
           hdiutil create \
@@ -33,86 +52,106 @@ jobs:
             -srcfolder "dist/Steam Curator.app" \
             -ov -format UDZO \
             "dist/SteamCurator-macOS.dmg"
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
           path: dist/SteamCurator-macOS.dmg
           retention-days: 7
 
+  # ── Windows ──────────────────────────────────────────────────────────────────
   build-windows:
     name: Windows (.exe zip)
     runs-on: windows-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+
       - name: Install deps
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyinstaller
           python -m pip install -r requirements.txt
+          python -c "import tkinter; print('tkinter OK')"
+
       - name: Build
         shell: pwsh
         run: python -m PyInstaller packaging/build.spec --clean --noconfirm
+
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path dist/SteamCurator -DestinationPath dist/SteamCurator-Windows.zip
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-zip
           path: dist/SteamCurator-Windows.zip
           retention-days: 7
 
+  # ── Linux AppImage ────────────────────────────────────────────────────────────
   build-linux:
     name: Linux (AppImage)
     runs-on: ubuntu-22.04
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+
       - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y python3-tk tk-dev libfuse2 fuse
+          sudo apt-get install -y \
+            python3-tk tk-dev libfuse2 fuse \
+            python3-pil python3-pil.imagetk
+
       - name: Install Python deps
         run: |
           pip install --upgrade pip pyinstaller
           pip install -r requirements.txt
+          python -c "import tkinter; print('tkinter OK')"
+
       - name: Build binary
         run: pyinstaller packaging/build.spec --clean --noconfirm
+
       - name: Prepare icon
         run: python3 packaging/make_icon.py
+
       - name: Download appimagetool
         run: |
-          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
+          wget -q \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
             -O /usr/local/bin/appimagetool
           chmod +x /usr/local/bin/appimagetool
+
       - name: Build AppImage
         run: |
           mkdir -p AppDir/usr/bin
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
           cp -r dist/SteamCurator/* AppDir/usr/bin/
 
-          cat > AppDir/SteamCurator.desktop << EOF2
+          cat > AppDir/SteamCurator.desktop << 'DESKTOP'
           [Desktop Entry]
           Name=Steam Curator
           Exec=SteamCurator
           Icon=steamcurator
           Type=Application
           Categories=Game;Utility;
-          EOF2
+          DESKTOP
 
           printf '#!/bin/bash\nexec "$APPDIR/usr/bin/SteamCurator" "$@"\n' > AppDir/AppRun
           chmod +x AppDir/AppRun
 
           if [ -f "assets/icon.png" ]; then
             cp assets/icon.png AppDir/steamcurator.png
-            cp assets/icon.png "AppDir/usr/share/icons/hicolor/256x256/apps/steamcurator.png"
+            cp assets/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/steamcurator.png
           fi
 
           ARCH=x86_64 appimagetool AppDir dist/SteamCurator-Linux.AppImage
@@ -123,20 +162,25 @@ jobs:
           path: dist/SteamCurator-Linux.AppImage
           retention-days: 7
 
+  # ── GitHub Release ────────────────────────────────────────────────────────────
   release:
     name: Create Release
     needs: [build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
       - name: Get version
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -144,8 +188,7 @@ jobs:
           body: |
             ## Steam Curator ${{ steps.version.outputs.VERSION }}
 
-            Personal Steam wishlist manager with smart buy recommendations,
-            bulk cover downloads, spending dashboard, and Google Drive sync.
+            Personal Steam wishlist manager — PimpMySteam ecosystem.
 
             | Platform | File |
             |----------|------|
@@ -156,6 +199,11 @@ jobs:
             **macOS:** Open DMG → drag to Applications.
             **Windows:** Extract ZIP → run `SteamCurator.exe`.
             **Linux:** `chmod +x SteamCurator-Linux.AppImage && ./SteamCurator-Linux.AppImage`
+
+            ### Connect to PimpMySteam
+            1. Create account at [pimpmysteam.com](https://pimpmysteam.com)
+            2. Settings → Apps → Generate Token
+            3. Paste in Steam Curator → Settings → PimpMySteam Account → Verify
           files: |
             artifacts/macos-dmg/SteamCurator-macOS.dmg
             artifacts/windows-zip/SteamCurator-Windows.zip
