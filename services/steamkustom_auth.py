@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 from typing import Optional, Callable
 
-BASE_DIR      = Path(__file__).resolve().parents[1]
+from config import BASE_DIR
 SETTINGS_PATH = BASE_DIR / "settings.json"
 API_URL       = "https://steamkustom-production.up.railway.app"
 

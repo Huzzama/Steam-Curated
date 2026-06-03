@@ -1,12 +1,52 @@
+import sys
 from pathlib import Path
 
-BASE_DIR    = Path(__file__).parent
+# ── Base directories ───────────────────────────────────────────────────────────
+# When running as a PyInstaller bundle, use user data directory
+# so we never write to the read-only .app bundle
+def _get_base_dir() -> Path:
+    """
+    Returns writable base directory for user data.
+    - Bundled (.app/.exe): ~/Library/Application Support/SteamCurator (mac)
+                           %APPDATA%/SteamCurator (win)
+                           ~/.local/share/SteamCurator (linux)
+    - Dev (running from source): project root
+    """
+    if getattr(sys, 'frozen', False):
+        # Running as PyInstaller bundle
+        if sys.platform == 'darwin':
+            base = Path.home() / 'Library' / 'Application Support' / 'SteamCurator'
+        elif sys.platform == 'win32':
+            import os
+            base = Path(os.environ.get('APPDATA', Path.home())) / 'SteamCurator'
+        else:
+            base = Path.home() / '.local' / 'share' / 'SteamCurator'
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+    else:
+        # Running from source — use project root
+        return Path(__file__).parent
+
+def _get_bundle_dir() -> Path:
+    """Returns the directory where the bundled resources live (read-only in .app)."""
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS)
+    return Path(__file__).parent
+
+BASE_DIR    = _get_base_dir()
+BUNDLE_DIR  = _get_bundle_dir()
+
+# Writable data paths (user data dir)
 ASSETS_DIR  = BASE_DIR / "assets"
 COVERS_DIR  = ASSETS_DIR / "covers"
-LOCALES_DIR = BASE_DIR / "locales"
 EXCEL_PATH  = BASE_DIR / "biblioteca.xlsx"
 
+# Read-only resource paths (inside bundle)
+LOCALES_DIR = BUNDLE_DIR / "locales"
+
+# Create writable dirs
 COVERS_DIR.mkdir(parents=True, exist_ok=True)
+ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 STEAMGRIDDB_API_KEY = "YOUR_STEAMGRIDDB_API_KEY"
 STEAM_API_BASE   = "https://store.steampowered.com/api"
@@ -19,31 +59,31 @@ MIN_WINDOW_SIZE = (900, 600)
 
 # ── New dark cold palette ─────────────────────────────────────────────────────
 COLORS = {
-    "bg":         "#09090b",   # zinc-950 — near black
-    "panel":      "#0f0f12",   # slightly lighter panel
-    "card":       "#141418",   # card background
-    "card_hover": "#1c1c22",   # hover state
-    "blue":       "#60a5fa",   # cold blue-400
-    "blue_dim":   "#1d4ed8",   # blue-700 for subtle fills
-    "green":      "#4ade80",   # green-400
-    "text":       "#f4f4f5",   # zinc-100
-    "text_dim":   "#71717a",   # zinc-500
-    "border":     "#27272a",   # zinc-800
-    "gold":       "#fbbf24",   # amber-400
-    "red":        "#f87171",   # red-400
+    "bg":         "#09090b",
+    "panel":      "#0f0f12",
+    "card":       "#141418",
+    "card_hover": "#1c1c22",
+    "blue":       "#60a5fa",
+    "blue_dim":   "#1d4ed8",
+    "green":      "#4ade80",
+    "text":       "#f4f4f5",
+    "text_dim":   "#71717a",
+    "border":     "#27272a",
+    "gold":       "#fbbf24",
+    "red":        "#f87171",
 }
 
 PRIORITY_COLORS = {
-    "S": "#fbbf24",   # amber — must buy
-    "A": "#4ade80",   # green — very important
-    "B": "#60a5fa",   # cold blue — interesting
-    "C": "#52525b",   # zinc-600 — low priority
+    "S": "#fbbf24",
+    "A": "#4ade80",
+    "B": "#60a5fa",
+    "C": "#52525b",
 }
 
 STATUS_OPTIONS   = ["Wishlist", "Archivado"]
 PRIORITY_OPTIONS = ["S", "A", "B", "C"]
 
-# ── Steam Sale Events 2026-2027 ───────────────────────────────────────────────
+# ── Steam Sale Events ─────────────────────────────────────────────────────────
 STEAM_SALE_EVENTS = [
     {"key": "summer_sale_2026",    "start": "2026-06-25", "end": "2026-07-09",
      "confirmed": False, "color_top": "#1A6B9A", "color_bot": "#0D3550", "emoji": "☀️"},
