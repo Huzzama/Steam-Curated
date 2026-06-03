@@ -14,7 +14,7 @@ jobs:
   # ── macOS ────────────────────────────────────────────────────────────────────
   build-macos:
     name: macOS (.app + .dmg)
-    runs-on: macos-13       # macOS 13 Ventura — more stable for tkinter/customtkinter
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
