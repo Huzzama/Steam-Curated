@@ -1,163 +1,199 @@
-import customtkinter as ctk
-from PIL import Image, ImageDraw
-from pathlib import Path
+"""
+Core UI widgets — PySide6.
+Drop-in replacements for the old CustomTkinter widgets.
+StatCard, SteamButton, SectionHeader, DealBanner.
+"""
+from __future__ import annotations
 from typing import Optional, Callable
+
+from PySide6.QtWidgets import (
+    QFrame, QLabel, QPushButton, QHBoxLayout, QVBoxLayout, QWidget,
+)
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtGui import QFont, QColor
+
 from config import COLORS, PRIORITY_COLORS
-from data.models import Game
-import i18n
 
 
-# ── Image helpers ─────────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-def make_ctk_image(path: Optional[str], size=(90, 135)) -> ctk.CTkImage:
-    """Load image via global LRU cache."""
-    from ui.image_cache import get as _cache_get
-    return _cache_get(path, size)
+def _font(size: int = 11, bold: bool = False) -> QFont:
+    f = QFont("Space Mono", size)
+    if bold:
+        f.setBold(True)
+    return f
 
 
-def _placeholder_image(size=(90, 135)) -> ctk.CTkImage:
-    img  = Image.new("RGB", size, color=(20, 20, 24))
-    draw = ImageDraw.Draw(img)
-    draw.rectangle([0, 0, size[0]-1, size[1]-1], outline=(39, 39, 42), width=1)
-    draw.text((size[0]//2, size[1]//2), "?", fill=(96, 165, 250), anchor="mm")
-    return ctk.CTkImage(light_image=img, dark_image=img, size=size)
+def _qss_color(key: str) -> str:
+    return COLORS.get(key, "#888")
 
 
 # ── StatCard ──────────────────────────────────────────────────────────────────
 
-class StatCard(ctk.CTkFrame):
-    """
-    Metric card with colored accent border, icon, and animated value.
-    accent_color drives the left border, icon, and value color.
-    """
+class StatCard(QFrame):
+    """Metric card with colored accent left bar, icon, label and value."""
 
-    def __init__(self, parent, label: str, value: str,
-                 value_color: str = None, icon: str = "",
-                 accent: str = None, **kwargs):
-        accent = accent or value_color or COLORS["blue"]
+    def __init__(self, parent=None, label: str = "", value: str = "—",
+                 icon: str = "", accent: str = None, **kwargs):
+        super().__init__(parent)
+        self._accent = accent or COLORS["blue"]
+        self._value_lbl: QLabel
 
-        super().__init__(
-            parent,
-            fg_color=COLORS["card"],
-            corner_radius=8,
-            border_width=1,
-            border_color=COLORS["border"],
-            **kwargs,
-        )
+        self.setStyleSheet(f"""
+            StatCard {{
+                background: {COLORS['card']};
+                border: 1px solid {COLORS['border']};
+                border-left: 3px solid {self._accent};
+                border-radius: 8px;
+            }}
+        """)
+        self.setMinimumHeight(72)
 
-        # Colored left accent bar
-        ctk.CTkFrame(
-            self, fg_color=accent,
-            width=3, corner_radius=0,
-        ).place(x=0, y=0, relheight=1)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 10, 8, 10)
+        lay.setSpacing(2)
 
         # Icon + label row
-        top = ctk.CTkFrame(self, fg_color="transparent")
-        top.pack(anchor="w", padx=(14, 8), pady=(10, 0))
-
+        top = QHBoxLayout()
+        top.setSpacing(4)
         if icon:
-            ctk.CTkLabel(
-                top, text=icon,
-                font=ctk.CTkFont(size=13),
-                text_color=accent,
-            ).pack(side="left", padx=(0, 4))
+            ico = QLabel(icon)
+            ico.setFont(_font(12))
+            ico.setStyleSheet(f"color: {self._accent};")
+            top.addWidget(ico)
 
-        ctk.CTkLabel(
-            top, text=label,
-            font=ctk.CTkFont(size=10),
-            text_color=COLORS["text_dim"],
-        ).pack(side="left")
+        lbl = QLabel(label)
+        lbl.setFont(_font(10))
+        lbl.setStyleSheet(f"color: {COLORS['text_dim']};")
+        top.addWidget(lbl)
+        top.addStretch()
+        lay.addLayout(top)
 
         # Value
-        self._value_label = ctk.CTkLabel(
-            self, text=value,
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color=accent,
-        )
-        self._value_label.pack(anchor="w", padx=14, pady=(1, 10))
+        self._value_lbl = QLabel(value)
+        self._value_lbl.setFont(_font(20, bold=True))
+        self._value_lbl.setStyleSheet(f"color: {self._accent};")
+        lay.addWidget(self._value_lbl)
 
     def set_value(self, value: str, color: str = None):
-        from ui.animations import animate_value_change
-        if self._value_label.cget("text") != value:
-            animate_value_change(self._value_label, value)
+        self._value_lbl.setText(value)
         if color:
-            self._value_label.configure(text_color=color)
+            self._value_lbl.setStyleSheet(f"color: {color};")
 
 
 # ── SteamButton ───────────────────────────────────────────────────────────────
 
-class SteamButton(ctk.CTkButton):
-    """Primary button with micro-animation on hover."""
+class SteamButton(QPushButton):
+    """Styled button — primary / success / ghost variants."""
 
-    def __init__(self, parent, text: str, command=None, style="primary", **kwargs):
-        palettes = {
-            "primary": (COLORS["blue"],   "#93c5fd", COLORS["bg"]),
-            "success": (COLORS["green"],  "#86efac", "#000"),
-            "ghost":   ("transparent",    COLORS["card_hover"], COLORS["text"]),
-        }
-        fg, hover, txt = palettes.get(style, palettes["primary"])
+    _STYLES = {
+        "primary": (COLORS["blue"],   "#93c5fd", COLORS["bg"],   COLORS["blue"]),
+        "success": (COLORS["green"],  "#86efac", "#000",         COLORS["green"]),
+        "ghost":   ("transparent",    COLORS["card_hover"], COLORS["text"], COLORS["border"]),
+    }
 
-        super().__init__(
-            parent,
-            text=text,
-            command=command,
-            fg_color=fg,
-            hover_color=hover,
-            text_color=txt,
-            border_color=COLORS["border"] if style == "ghost" else fg,
-            border_width=1 if style == "ghost" else 0,
-            corner_radius=6,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            **kwargs,
-        )
+    def __init__(self, parent=None, text: str = "", command=None,
+                 style: str = "primary", **kwargs):
+        super().__init__(text, parent)
+        if command:
+            self.clicked.connect(command)
+
+        bg, hover, fg, border = self._STYLES.get(style, self._STYLES["primary"])
+        self.setStyleSheet(f"""
+            SteamButton {{
+                background: {bg};
+                color: {fg};
+                border: 1px solid {border};
+                border-radius: 6px;
+                font-family: 'Space Mono';
+                font-size: 12px;
+                font-weight: bold;
+                padding: 4px 14px;
+                min-height: 28px;
+            }}
+            SteamButton:hover {{
+                background: {hover};
+            }}
+            SteamButton:disabled {{
+                color: {COLORS['text_dim']};
+                border-color: {COLORS['border']};
+                background: {COLORS['card']};
+            }}
+        """)
 
 
 # ── SectionHeader ─────────────────────────────────────────────────────────────
 
-class SectionHeader(ctk.CTkFrame):
-    def __init__(self, parent, title: str, action_text: str = None,
-                 action_cmd=None, **kwargs):
-        super().__init__(parent, fg_color="transparent", **kwargs)
+class SectionHeader(QFrame):
+    def __init__(self, parent=None, title: str = "",
+                 action_text: str = None, action_cmd=None, **kwargs):
+        super().__init__(parent)
+        self.setStyleSheet("background: transparent;")
 
-        ctk.CTkLabel(
-            self, text=title,
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=COLORS["text_dim"],
-        ).pack(side="left")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
 
-        if action_text:
-            SteamButton(
-                self, text=action_text, command=action_cmd,
-                style="ghost", height=26, width=100,
-            ).pack(side="right")
+        lbl = QLabel(title)
+        lbl.setFont(_font(11, bold=True))
+        lbl.setStyleSheet(f"color: {COLORS['text_dim']};")
+        lay.addWidget(lbl)
+        lay.addStretch()
+
+        if action_text and action_cmd:
+            btn = SteamButton(self, text=action_text,
+                              command=action_cmd, style="ghost")
+            btn.setFixedHeight(26)
+            lay.addWidget(btn)
 
 
 # ── DealBanner ────────────────────────────────────────────────────────────────
 
-class DealBanner(ctk.CTkFrame):
+class DealBanner(QFrame):
     """Buy-now alert banner."""
 
-    def __init__(self, parent, game: Game, **kwargs):
-        super().__init__(
-            parent,
-            fg_color="#0a1f0a",
-            corner_radius=8,
-            border_width=1,
-            border_color="#1a4a1a",
-            **kwargs,
-        )
-        ctk.CTkLabel(
-            self,
-            text=f"🔥  {game.name} — {i18n.t('recommendation.buy_now')}",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=COLORS["green"],
-        ).pack(side="left", padx=14, pady=10)
+    def __init__(self, parent=None, game=None, **kwargs):
+        super().__init__(parent)
+        self.setStyleSheet(f"""
+            DealBanner {{
+                background: #0a1f0a;
+                border: 1px solid #1a4a1a;
+                border-radius: 8px;
+            }}
+        """)
 
-        if game.price and game.price_history:
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 10, 14, 10)
+
+        import i18n
+        name = game.name if game else ""
+        lbl = QLabel(f"🔥  {name} — {i18n.t('recommendation.buy_now')}")
+        lbl.setFont(_font(13, bold=True))
+        lbl.setStyleSheet(f"color: {COLORS['green']};")
+        lay.addWidget(lbl)
+
+        if game and game.price and game.price_history:
             info = (f"${game.price.current:,.0f} {game.price.currency} · "
                     f"mín: ${game.price_history.all_time_low:,.0f}")
-            ctk.CTkLabel(
-                self, text=info,
-                font=ctk.CTkFont(size=11),
-                text_color=COLORS["text_dim"],
-            ).pack(side="left", padx=4)
+            info_lbl = QLabel(info)
+            info_lbl.setFont(_font(11))
+            info_lbl.setStyleSheet(f"color: {COLORS['text_dim']};")
+            lay.addWidget(info_lbl)
+
+        lay.addStretch()
+
+
+# ── make_ctk_image (compat shim) ──────────────────────────────────────────────
+
+def make_ctk_image(path: Optional[str], size=(90, 135)):
+    """Compat shim — returns QPixmap for PySide6 code."""
+    from PySide6.QtGui import QPixmap
+    from pathlib import Path
+    if path and Path(path).exists():
+        px = QPixmap(path)
+        return px.scaled(size[0], size[1],
+                         Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    # Return blank pixmap
+    px = QPixmap(size[0], size[1])
+    px.fill(QColor(20, 20, 24))
+    return px

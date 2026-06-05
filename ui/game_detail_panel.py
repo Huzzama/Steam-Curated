@@ -1,25 +1,31 @@
-import customtkinter as ctk
+"""
+GameDetailPanel — PySide6.
+Side panel showing game details, price, recommendation, edit controls.
+"""
 import threading
 import webbrowser
 import subprocess
 import sys
-from typing import Optional
+from typing import Optional, Callable
+
+from PySide6.QtWidgets import (
+    QFrame, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QScrollArea, QTextEdit, QProgressBar,
+)
+from PySide6.QtCore import Qt, QTimer, Signal, QObject
+from PySide6.QtGui import QFont, QPixmap
+
 from config import COLORS, PRIORITY_OPTIONS, PRIORITY_COLORS
 from data.models import Game
 import data.repository as repo
 import services.steam_api as steam
 import services.steamdb_scraper as steamdb
 import services.steamgriddb as sgdb
-from ui.widgets import make_ctk_image
 from ui.settings_loader import get_settings
 import i18n
 
 
 def open_steam_page(app_id: str, fallback_url: str):
-    """
-    Try to open the Steam app directly to the store page.
-    Falls back to the browser if Steam isn't installed.
-    """
     steam_url = f"steam://store/{app_id}"
     try:
         if sys.platform == "darwin":
@@ -32,481 +38,593 @@ def open_steam_page(app_id: str, fallback_url: str):
         webbrowser.open(fallback_url)
 
 
-class GameDetailPanel(ctk.CTkFrame):
+class _Sig(QObject):
+    reload = Signal(object)   # Game
 
-    def __init__(self, parent, on_close: callable, on_refresh: callable, **kwargs):
-        super().__init__(
-            parent,
-            fg_color=COLORS["panel"],
-            corner_radius=0,
-            border_width=1,
-            border_color=COLORS["border"],
-            **kwargs,
-        )
-        self.on_close   = on_close
-        self.on_refresh = on_refresh
+
+def _lbl(text, size=10, bold=False, color=None, wrap=0):
+    l = QLabel(text)
+    f = QFont("Space Mono", size)
+    if bold: f.setBold(True)
+    l.setFont(f)
+    l.setStyleSheet(f"color:{color or COLORS['text']}; background-color:transparent;")
+    if wrap: l.setWordWrap(True)
+    return l
+
+
+def _divider():
+    f = QFrame()
+    f.setFrameShape(QFrame.Shape.HLine)
+    f.setStyleSheet(f"color:{COLORS['border']}; margin:8px 12px;")
+    return f
+
+
+def _ghost_btn(text, command=None, danger=False):
+    btn = QPushButton(text)
+    btn.setFixedHeight(30)
+    border = "#4a1515" if danger else COLORS["border"]
+    fg     = COLORS["red"] if danger else COLORS["text_dim"]
+    hover  = "#2a0a0a" if danger else COLORS["card_hover"]
+    btn.setStyleSheet(f"""
+        QPushButton {{
+            background:transparent; color:{fg};
+            border:1px solid {border}; border-radius:6px;
+            font-family:'Space Mono'; font-size:10px;
+            padding:0 8px;
+        }}
+        QPushButton:hover {{ background:{hover}; }}
+    """)
+    if command:
+        btn.clicked.connect(command)
+    return btn
+
+
+class GameDetailPanel(QFrame):
+
+    def __init__(self, parent=None,
+                 on_close: Callable = None,
+                 on_refresh: Callable = None, **kwargs):
+        super().__init__(parent)
+        self.on_close   = on_close   or (lambda: None)
+        self.on_refresh = on_refresh or (lambda: None)
         self._game: Optional[Game] = None
+        self._sig = _Sig()
+        self._sig.reload.connect(self.load_game)
+
+        self.setStyleSheet(f"""
+            GameDetailPanel {{
+                background:{COLORS['panel']};
+                border-left:1px solid {COLORS['border']};
+            }}
+        """)
         self._build_shell()
 
     def _build_shell(self):
-        # Fixed top bar
-        topbar = ctk.CTkFrame(self, fg_color=COLORS["bg"], corner_radius=0, height=42)
-        topbar.pack(fill="x")
-        topbar.pack_propagate(False)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        self._title_label = ctk.CTkLabel(
-            topbar, text="",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=COLORS["text"],
-        )
-        self._title_label.pack(side="left", padx=12, pady=10)
+        # Top bar
+        topbar = QFrame()
+        topbar.setFixedHeight(42)
+        topbar.setStyleSheet(f"background:{COLORS['bg']}; border:none;")
+        tb = QHBoxLayout(topbar)
+        tb.setContentsMargins(12, 0, 6, 0)
 
-        ctk.CTkButton(
-            topbar, text="✕", width=32, height=32,
-            fg_color="transparent", text_color=COLORS["text_dim"],
-            hover_color=COLORS["card_hover"], corner_radius=6,
-            font=ctk.CTkFont(size=13),
-            command=self.on_close,
-        ).pack(side="right", padx=6, pady=5)
+        self._title_lbl = _lbl("", 12, bold=True)
+        tb.addWidget(self._title_lbl)
+        tb.addStretch()
 
-        # Scrollable content
-        self._scroll = ctk.CTkScrollableFrame(
-            self, fg_color=COLORS["panel"], corner_radius=0,
-        )
-        self._scroll.pack(fill="both", expand=True)
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(32, 32)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{ background:transparent; color:{COLORS['text_dim']};
+                border:none; border-radius:6px; font-size:13px; }}
+            QPushButton:hover {{ background:{COLORS['card_hover']}; }}
+        """)
+        close_btn.clicked.connect(self.on_close)
+        tb.addWidget(close_btn)
+        root.addWidget(topbar)
+
+        # Scroll area
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet(f"""
+            QScrollArea {{ border:none; background:{COLORS['panel']}; }}
+            QScrollBar:vertical {{
+                background:{COLORS['panel']}; width:4px; border:none;
+            }}
+            QScrollBar::handle:vertical {{
+                background:{COLORS['border']}; border-radius:2px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
+        """)
+        self._content = QWidget()
+        self._content.setStyleSheet(f"background:{COLORS['panel']};")
+        self._content_lay = QVBoxLayout(self._content)
+        self._content_lay.setContentsMargins(0, 0, 0, 16)
+        self._content_lay.setSpacing(0)
+        self._scroll.setWidget(self._content)
+        root.addWidget(self._scroll, 1)
 
     def load_game(self, game: Game):
         self._game = game
-        self._title_label.configure(text=game.name)
-        for w in self._scroll.winfo_children():
-            w.destroy()
+        self._title_lbl.setText(game.name)
+        # Clear content
+        while self._content_lay.count():
+            item = self._content_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
         self._render(game)
 
-    # ─────────────────────────────────────────────────────────────
+    # ── Render ────────────────────────────────────────────────────────────────
 
     def _render(self, game: Game):
-        s = self._scroll
+        lay = self._content_lay
+        P   = 12
 
-        # ── Cover ────────────────────────────────────────────────
-        cover = make_ctk_image(game.cover_path, size=(160, 240))
-        ctk.CTkLabel(s, image=cover, text="").pack(pady=(12, 0))
+        def add(w, **pack_kw):
+            lay.addWidget(w)
 
-        # ── Priority badge ───────────────────────────────────────
-        badge_color = PRIORITY_COLORS.get(game.priority, "#666")
-        badge_row = ctk.CTkFrame(s, fg_color="transparent")
-        badge_row.pack(pady=(8, 0))
-        ctk.CTkLabel(
-            badge_row, text=game.priority,
-            font=ctk.CTkFont(size=10, weight="bold"),
-            fg_color=badge_color,
-            text_color="#FFFFFF" if game.priority != "S" else "#1a0f00",
-            corner_radius=4, width=24, height=24,
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkLabel(
-            badge_row, text=i18n.t(f"priority.{game.priority}"),
-            font=ctk.CTkFont(size=10), text_color=COLORS["text_dim"],
-        ).pack(side="left")
+        # Cover
+        cov_lbl = QLabel()
+        cov_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cov_lbl.setStyleSheet("background:transparent;")
+        if game.cover_path:
+            px = QPixmap(game.cover_path)
+            if not px.isNull():
+                px = px.scaled(160, 240, Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+                cov_lbl.setPixmap(px)
+        cov_lbl.setContentsMargins(0, 12, 0, 0)
+        add(cov_lbl)
 
-        # ── Game name ────────────────────────────────────────────
-        ctk.CTkLabel(
-            s, text=game.name,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color=COLORS["text"], wraplength=250,
-        ).pack(pady=(4, 0), padx=12)
+        # Priority badge
+        badge_row = QWidget()
+        badge_row.setStyleSheet("background:transparent;")
+        br = QHBoxLayout(badge_row)
+        br.setContentsMargins(P, 8, P, 0)
+        br.setSpacing(6)
+        badge = QLabel(game.priority)
+        badge.setFixedSize(24, 24)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        color = PRIORITY_COLORS.get(game.priority, "#666")
+        badge.setStyleSheet(f"""
+            background:{color}; color:#000; border-radius:4px;
+            font-family:'Space Mono'; font-weight:bold; font-size:10px;
+        """)
+        br.addWidget(badge)
+        br.addWidget(_lbl(i18n.t(f"priority.{game.priority}"), 10,
+                          color=COLORS["text_dim"]))
+        br.addStretch()
+        add(badge_row)
 
-        # ── CHECK ON STEAM button ────────────────────────────────
+        # Game name
+        name_lbl = _lbl(game.name, 13, bold=True)
+        name_lbl.setWordWrap(True)
+        name_lbl.setContentsMargins(P, 4, P, 0)
+        add(name_lbl)
+
+        # Steam button
         if game.app_id:
-            steam_btn = ctk.CTkButton(
-                s,
-                text=i18n.t("detail.check_on_steam"),
-                command=lambda: open_steam_page(game.app_id, game.steam_url),
-                fg_color="#1B2838",
-                hover_color="#2a475e",
-                text_color=COLORS["blue"],
-                border_color=COLORS["blue"],
-                border_width=1,
-                corner_radius=6,
-                font=ctk.CTkFont(size=12, weight="bold"),
-                height=32,
-                width=200,
-            )
-            steam_btn.pack(pady=(8, 0))
+            steam_btn = QPushButton(i18n.t("detail.check_on_steam"))
+            steam_btn.setFixedHeight(32)
+            steam_btn.setStyleSheet(f"""
+                QPushButton {{ background:#1B2838; color:{COLORS['blue']};
+                    border:1px solid {COLORS['blue']}; border-radius:6px;
+                    font-family:'Space Mono'; font-size:12px; font-weight:bold;
+                    margin:8px {P}px 0 {P}px; }}
+                QPushButton:hover {{ background:#2a475e; }}
+            """)
+            steam_btn.clicked.connect(
+                lambda: open_steam_page(game.app_id, game.steam_url))
+            add(steam_btn)
 
-        # ── "I bought this" button ───────────────────────────────
+        # Purchased / Buy button
         import data.purchase_repository as purchases
-        already_bought = purchases.get_by_app_id(game.app_id)
-
-        if already_bought:
-            bought_frame = ctk.CTkFrame(s, fg_color="#0a1f0a",
-                                        corner_radius=8, border_width=1,
-                                        border_color="#1a4a1a")
-            bought_frame.pack(fill="x", padx=12, pady=(8,0))
-            ctk.CTkLabel(
-                bought_frame,
-                text=f"✓  Purchased {already_bought.edition} Edition",
-                font=ctk.CTkFont(size=11, weight="bold"),
-                text_color=COLORS["green"],
-            ).pack(side="left", padx=12, pady=8)
-            ctk.CTkLabel(
-                bought_frame,
-                text=f"${already_bought.price_paid:,.2f} {already_bought.currency}  ·  {already_bought.purchased_at}",
-                font=ctk.CTkFont(size=10),
-                text_color=COLORS["text_dim"],
-            ).pack(side="right", padx=12)
+        bought = purchases.get_by_app_id(game.app_id)
+        if bought:
+            b_frame = QFrame()
+            b_frame.setStyleSheet(f"""
+                QFrame {{ background:#0a1f0a; border:1px solid #1a4a1a;
+                          border-radius:8px; margin:{4}px {P}px 0 {P}px; }}
+            """)
+            bf = QHBoxLayout(b_frame)
+            bf.setContentsMargins(12, 8, 12, 8)
+            bf.addWidget(_lbl(f"✓  Purchased {bought.edition} Edition",
+                              11, bold=True, color=COLORS["green"]))
+            bf.addStretch()
+            bf.addWidget(_lbl(
+                f"${bought.price_paid:,.2f} {bought.currency}  ·  {bought.purchased_at}",
+                10, color=COLORS["text_dim"]))
+            add(b_frame)
         else:
-            ctk.CTkButton(
-                s,
-                text="🛒  I bought this game",
-                command=lambda: self._mark_purchased(game),
-                fg_color=COLORS["green"],
-                text_color="#000",
-                hover_color="#86efac",
-                corner_radius=6,
-                font=ctk.CTkFont(size=12, weight="bold"),
-                height=34,
-            ).pack(fill="x", padx=12, pady=(8, 0))
+            buy_btn = QPushButton("🛒  I bought this game")
+            buy_btn.setFixedHeight(34)
+            buy_btn.setStyleSheet(f"""
+                QPushButton {{ background:{COLORS['green']}; color:#000;
+                    border:none; border-radius:6px;
+                    font-family:'Space Mono'; font-size:12px; font-weight:bold;
+                    margin:8px {P}px 0 {P}px; }}
+                QPushButton:hover {{ background:#86efac; }}
+            """)
+            buy_btn.clicked.connect(lambda: self._mark_purchased(game))
+            add(buy_btn)
 
-        self._divider(s)
+        add(_divider())
+        self._render_price(lay, game, P)
+        add(_divider())
+        self._render_price_compare(lay, game, P)
+        add(_divider())
+        self._render_recommendation(lay, game, P)
+        add(_divider())
 
-        # ── Price ────────────────────────────────────────────────
-        self._render_price(s, game)
-        self._divider(s)
+        # Metadata
+        for label, value in [
+            (i18n.t("game.genre"),    game.genre or "—"),
+            (i18n.t("game.year"),     str(game.release_year) if game.release_year else "—"),
+            (i18n.t("game.developer"),game.developer or "—"),
+            (i18n.t("game.publisher"),game.publisher or "—"),
+        ]:
+            row = QWidget()
+            row.setStyleSheet("background:transparent;")
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(P, 1, P, 1)
+            l1 = _lbl(label + ":", 10, color=COLORS["text_dim"])
+            l1.setFixedWidth(90)
+            l2 = _lbl(value, 10)
+            l2.setWordWrap(True)
+            rl.addWidget(l1)
+            rl.addWidget(l2, 1)
+            add(row)
 
-        # ── Smart recommendation ──────────────────────────────────
-        self._render_recommendation(s, game)
-        self._divider(s)
+        add(_divider())
+        self._render_edit(lay, game, P)
 
-        # ── Metadata ─────────────────────────────────────────────
-        self._info_row(s, i18n.t("game.genre"),     game.genre or "—")
-        self._info_row(s, i18n.t("game.year"),       str(game.release_year) if game.release_year else "—")
-        self._info_row(s, i18n.t("game.developer"),  game.developer or "—")
-        self._info_row(s, i18n.t("game.publisher"),  game.publisher or "—")
+        # Action buttons
+        for text, cmd, danger in [
+            (i18n.t("detail.refresh_prices"), lambda: self._refresh_prices(game), False),
+            (i18n.t("detail.retry_cover"),    lambda: self._download_cover(game), False),
+            (i18n.t("detail.delete_game"),    lambda: self._delete(game),         True),
+        ]:
+            btn = _ghost_btn(text, cmd, danger)
+            btn.setContentsMargins(P, 0, P, 0)
+            w = QWidget()
+            w.setStyleSheet("background:transparent;")
+            wl = QVBoxLayout(w)
+            wl.setContentsMargins(P, 2, P, 2)
+            wl.addWidget(btn)
+            add(w)
 
-        self._divider(s)
+        lay.addStretch()
 
-        # ── Edit ─────────────────────────────────────────────────
-        self._render_edit(s, game)
+    # ── Price section ─────────────────────────────────────────────────────────
 
-        # ── Action buttons ───────────────────────────────────────
-        ctk.CTkButton(
-            s, text=i18n.t("detail.refresh_prices"),
-            command=lambda: self._refresh_prices(game),
-            fg_color="transparent",
-            border_color=COLORS["border"], border_width=1,
-            text_color=COLORS["text_dim"], hover_color=COLORS["card_hover"],
-            corner_radius=6, height=30, font=ctk.CTkFont(size=10),
-        ).pack(fill="x", padx=12, pady=(6, 3))
-
-        ctk.CTkButton(
-            s, text=i18n.t("detail.retry_cover"),
-            command=lambda: self._download_cover(game),
-            fg_color="transparent",
-            border_color=COLORS["border"], border_width=1,
-            text_color=COLORS["text_dim"], hover_color=COLORS["card_hover"],
-            corner_radius=6, height=30, font=ctk.CTkFont(size=10),
-        ).pack(fill="x", padx=12, pady=(0, 3))
-
-        ctk.CTkButton(
-            s, text=i18n.t("detail.delete_game"),
-            command=lambda: self._delete(game),
-            fg_color="transparent",
-            border_color="#4a1515", border_width=1,
-            text_color=COLORS["red"], hover_color="#2a0a0a",
-            corner_radius=6, height=30, font=ctk.CTkFont(size=10),
-        ).pack(fill="x", padx=12, pady=(0, 16))
-
-    # ─────────────────────────────────────────────────────────────
-    # Price section
-    # ─────────────────────────────────────────────────────────────
-
-    def _render_price(self, parent, game: Game):
-        frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.pack(fill="x", padx=12)
+    def _render_price(self, lay, game: Game, P: int):
+        frame = QWidget()
+        frame.setStyleSheet("background:transparent;")
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(P, 0, P, 0)
+        fl.setSpacing(2)
 
         if game.price:
             p = game.price
-            row = ctk.CTkFrame(frame, fg_color="transparent")
-            row.pack(fill="x")
-            ctk.CTkLabel(
-                row, text=f"${p.current:,.0f} {p.currency}",
-                font=ctk.CTkFont(size=20, weight="bold"),
-                text_color=COLORS["green"] if p.is_on_sale else COLORS["text"],
-            ).pack(side="left")
+            pr = QHBoxLayout()
+            price_lbl = _lbl(f"${p.current:,.0f} {p.currency}", 20, bold=True,
+                             color=COLORS["green"] if p.is_on_sale else COLORS["text"])
+            pr.addWidget(price_lbl)
             if p.discount_pct:
-                ctk.CTkLabel(
-                    row, text=f"-{p.discount_pct}%",
-                    font=ctk.CTkFont(size=11, weight="bold"),
-                    fg_color=COLORS["green"], text_color="#fff",
-                    corner_radius=4, width=44, height=22,
-                ).pack(side="left", padx=(6, 0))
+                disc = QLabel(f"-{p.discount_pct}%")
+                disc.setFixedHeight(22)
+                disc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                disc.setFont(QFont("Space Mono", 10, QFont.Weight.Bold))
+                disc.setStyleSheet(f"""
+                    background:{COLORS['green']}; color:#fff;
+                    border-radius:4px; padding:0 6px;
+                """)
+                pr.addWidget(disc)
+            pr.addStretch()
+            fl.addLayout(pr)
             if p.base != p.current:
-                ctk.CTkLabel(
-                    frame, text=f"{i18n.t('detail.base_price')}: ${p.base:,.0f}",
-                    font=ctk.CTkFont(size=10), text_color=COLORS["text_dim"],
-                ).pack(anchor="w")
-        else:
-            ctk.CTkLabel(frame, text="—",
-                         font=ctk.CTkFont(size=13), text_color=COLORS["text_dim"]).pack(anchor="w")
+                fl.addWidget(_lbl(
+                    f"{i18n.t('detail.base_price')}: ${p.base:,.0f}",
+                    10, color=COLORS["text_dim"]))
 
         if game.price_history and game.price_history.all_time_low > 0:
             h = game.price_history
-            ctk.CTkLabel(
-                frame, text=f"{i18n.t('game.price_low')}: ${h.all_time_low:,.0f}",
-                font=ctk.CTkFont(size=11, weight="bold"), text_color=COLORS["blue"],
-            ).pack(anchor="w", pady=(4, 0))
+            fl.addWidget(_lbl(
+                f"{i18n.t('game.price_low')}: ${h.all_time_low:,.0f}",
+                11, bold=True, color=COLORS["blue"]))
             if h.all_time_low_date:
-                ctk.CTkLabel(frame, text=h.all_time_low_date,
-                             font=ctk.CTkFont(size=9), text_color=COLORS["text_dim"],
-                             ).pack(anchor="w")
+                fl.addWidget(_lbl(h.all_time_low_date, 9,
+                                  color=COLORS["text_dim"]))
 
             if game.price_diff_pct is not None:
-                diff      = game.price_diff_pct
-                rec       = game.buy_recommendation
-                rec_color = COLORS["green"] if diff <= 5 else (COLORS["gold"] if diff <= 25 else COLORS["red"])
-                ctk.CTkLabel(frame, text=f"→ {rec}",
-                             font=ctk.CTkFont(size=11, weight="bold"),
-                             text_color=rec_color).pack(anchor="w", pady=(6, 0))
+                diff = game.price_diff_pct
+                rec  = game.buy_recommendation
+                col  = (COLORS["green"] if diff <= 5 else
+                        COLORS["gold"]  if diff <= 25 else COLORS["red"])
+                fl.addWidget(_lbl(f"→ {rec}", 11, bold=True, color=col))
 
-                prog_val = max(0.0, min(1.0, 1 - diff / 100))
-                prog_row = ctk.CTkFrame(frame, fg_color="transparent")
-                prog_row.pack(fill="x", pady=(3, 0))
-                ctk.CTkLabel(prog_row, text="min", font=ctk.CTkFont(size=8),
-                             text_color=COLORS["text_dim"]).pack(side="left")
-                prog = ctk.CTkProgressBar(
-                    prog_row, fg_color=COLORS["border"],
-                    progress_color=COLORS["green"] if prog_val > 0.9 else COLORS["gold"],
-                )
-                prog.pack(side="left", fill="x", expand=True, padx=4)
-                prog.set(prog_val)
-                ctk.CTkLabel(prog_row, text="base", font=ctk.CTkFont(size=8),
-                             text_color=COLORS["text_dim"]).pack(side="left")
+                prog = QProgressBar()
+                prog.setFixedHeight(6)
+                prog.setRange(0, 100)
+                prog.setValue(max(0, min(100, int((1 - diff/100)*100))))
+                prog.setTextVisible(False)
+                bar_col = COLORS["green"] if diff <= 5 else COLORS["gold"]
+                prog.setStyleSheet(f"""
+                    QProgressBar {{ background:{COLORS['border']}; border-radius:3px; }}
+                    QProgressBar::chunk {{ background:{bar_col}; border-radius:3px; }}
+                """)
+                fl.addWidget(prog)
 
-    # ─────────────────────────────────────────────────────────────
-    # Smart recommendation
-    # ─────────────────────────────────────────────────────────────
+        lay.addWidget(frame)
 
-    def _render_recommendation(self, parent, game: Game):
-        from services.recommendation import get_recommendation
+    # ── Price comparator ─────────────────────────────────────────────────────
 
-        rec = get_recommendation(game)
+    def _render_price_compare(self, lay, game: Game, P: int):
+        """Show price in configured regions vs user's base currency."""
+        from ui.settings_loader import get_settings
+        settings = get_settings()
 
-        # Color per verdict
-        colors = {
-            "buy_now":   COLORS["green"],
-            "good_deal": COLORS["blue"],
-            "wait":      COLORS["gold"],
-            "no_data":   COLORS["text_dim"],
-        }
-        accent = colors.get(rec["verdict"], COLORS["text_dim"])
+        # Get user's base region and compare regions
+        base_cc      = settings.get("country", "mx")
+        compare_ccs  = settings.get("compare_regions",
+                                    ["us", "ar", "br"])
+        # Always show base first, then compare regions (no duplicates)
+        all_regions  = [base_cc] + [r for r in compare_ccs if r != base_cc]
 
-        icons = {
-            "buy_now":   "✓",
-            "good_deal": "◎",
-            "wait":      "⏳",
-            "no_data":   "—",
-        }
-        icon = icons.get(rec["verdict"], "—")
+        # Region display names from i18n
+        def region_name(cc): return i18n.t(f"regions.{cc}")
 
-        # Card
-        card = ctk.CTkFrame(
-            parent,
-            fg_color=COLORS["card"],
-            corner_radius=8,
-            border_width=1,
-            border_color=COLORS["border"],
-        )
-        card.pack(fill="x", padx=12, pady=(0, 4))
+        frame = QWidget()
+        frame.setStyleSheet("background:transparent;")
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(P, 0, P, 0)
+        fl.setSpacing(4)
+        fl.addWidget(_lbl(i18n.t("detail.price_by_region"), 11, bold=True))
 
-        # Accent bar
-        ctk.CTkFrame(card, fg_color=accent, width=3, corner_radius=0).place(
-            x=0, y=0, relheight=1,
-        )
+        self._compare_labels: dict[str, tuple] = {}  # cc -> (price_lbl, diff_lbl)
+        for cc in all_regions:
+            row = QWidget(); row.setStyleSheet("background:transparent;")
+            rl  = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(8)
 
-        # Header row: icon + headline
-        header = ctk.CTkFrame(card, fg_color="transparent")
-        header.pack(fill="x", padx=(14, 10), pady=(10, 4))
+            # Flag + region name
+            name_lbl = _lbl(region_name(cc), 10, color=COLORS["text_dim"])
+            name_lbl.setFixedWidth(120)
+            rl.addWidget(name_lbl)
 
-        ctk.CTkLabel(
-            header, text=icon,
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=accent,
-        ).pack(side="left", padx=(0, 8))
+            # Price (loading…)
+            price_lbl = _lbl("…", 11, bold=True)
+            rl.addWidget(price_lbl)
 
-        ctk.CTkLabel(
-            header, text=rec["headline"],
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=accent, anchor="w",
-        ).pack(side="left", fill="x", expand=True)
+            # % diff vs base (only for non-base regions)
+            diff_lbl = _lbl("", 10)
+            if cc == base_cc:
+                diff_lbl.setText("← base")
+                diff_lbl.setStyleSheet(f"color:{COLORS['blue']}; background:transparent;")
+            rl.addWidget(diff_lbl)
+            rl.addStretch()
 
-        # Reason text
-        if rec["reason"]:
-            ctk.CTkLabel(
-                card, text=rec["reason"],
-                font=ctk.CTkFont(size=10),
-                text_color=COLORS["text_dim"],
-                wraplength=270, justify="left", anchor="w",
-            ).pack(anchor="w", padx=14, pady=(0, 8))
+            self._compare_labels[cc] = (price_lbl, diff_lbl)
+            fl.addWidget(row)
 
-        # Next sale box
-        if rec["next_sale"]:
-            sale_box = ctk.CTkFrame(
-                card, fg_color=COLORS["bg"],
-                corner_radius=6, border_width=1,
-                border_color=COLORS["border"],
-            )
-            sale_box.pack(fill="x", padx=10, pady=(0, 10))
+        lay.addWidget(frame)
 
-            ctk.CTkLabel(
-                sale_box,
-                text="NEXT LIKELY SALE",
-                font=ctk.CTkFont(size=9),
-                text_color=COLORS["text_dim"],
-            ).pack(anchor="w", padx=10, pady=(6, 0))
+        # Fetch all regions in background
+        import threading as _t
+        import services.steam_api as _steam
 
-            ctk.CTkLabel(
-                sale_box,
-                text=rec["next_sale"],
-                font=ctk.CTkFont(size=11, weight="bold"),
-                text_color=COLORS["text"],
-            ).pack(anchor="w", padx=10, pady=(1, 0))
+        def _fetch():
+            prices: dict = {}
+            for cc in all_regions:
+                try:
+                    p = _steam.refresh_price(game.app_id, country=cc)
+                    prices[cc] = p
+                except Exception:
+                    prices[cc] = None
 
-            # Estimated price row
-            if rec["est_price"] and game.price:
-                est_row = ctk.CTkFrame(sale_box, fg_color="transparent")
-                est_row.pack(fill="x", padx=10, pady=(4, 8))
+            # Update labels on main thread
+            base_price = prices.get(base_cc)
+            base_val   = base_price.current if base_price else None
 
-                ctk.CTkLabel(
-                    est_row,
-                    text=f"Est. price: ",
-                    font=ctk.CTkFont(size=10),
-                    text_color=COLORS["text_dim"],
-                ).pack(side="left")
+            for cc in all_regions:
+                p = prices.get(cc)
+                pl, dl = self._compare_labels.get(cc, (None, None))
+                if not pl: continue
 
-                ctk.CTkLabel(
-                    est_row,
-                    text=f"${rec['est_price']:,.0f} {game.price.currency}",
-                    font=ctk.CTkFont(size=11, weight="bold"),
-                    text_color=COLORS["green"],
-                ).pack(side="left")
+                if p:
+                    txt = f"{p.current:,.0f} {p.currency}"
+                    if p.is_on_sale:
+                        txt += f"  -{p.discount_pct}%"
+                    col = COLORS["green"] if p.is_on_sale else COLORS["text"]
+                else:
+                    txt = "N/A"; col = COLORS["text_dim"]
 
-                if rec["est_discount"]:
-                    ctk.CTkLabel(
-                        est_row,
-                        text=f"  (-{rec['est_discount']}%)",
-                        font=ctk.CTkFont(size=10),
-                        text_color=COLORS["text_dim"],
-                    ).pack(side="left")
+                # Calculate % diff vs base for non-base regions
+                diff_txt = "← base" if cc == base_cc else ""
+                diff_col = COLORS["blue"]
+                if cc != base_cc and base_val and p and p.current:
+                    # We can't compare directly (different currencies)
+                    # Show relative to base price % discount from MSRP instead
+                    base_disc = base_price.discount_pct if base_price else 0
+                    this_disc = p.discount_pct
+                    diff = this_disc - base_disc
+                    if diff > 0:
+                        diff_txt = f"+{diff}% cheaper"
+                        diff_col = COLORS["green"]
+                    elif diff < 0:
+                        diff_txt = f"{diff}% pricier"
+                        diff_col = COLORS["red"]
+                    else:
+                        diff_txt = "same deal"
+                        diff_col = COLORS["text_dim"]
 
-                # Confidence badge
-                conf_colors = {"high": COLORS["green"], "medium": COLORS["gold"], "low": COLORS["text_dim"]}
-                ctk.CTkLabel(
-                    est_row,
-                    text=rec["confidence"].upper(),
-                    font=ctk.CTkFont(size=8),
-                    fg_color=conf_colors.get(rec["confidence"], COLORS["border"]),
-                    text_color="#000" if rec["confidence"] == "high" else COLORS["text"],
-                    corner_radius=4,
-                ).pack(side="right", padx=(4, 0))
+                QTimer.singleShot(0, lambda l=pl, t=txt, c=col: (
+                    l.setText(t), l.setStyleSheet(f"color:{c}; background:transparent;")))
+                if dl:
+                    QTimer.singleShot(0, lambda l=dl, t=diff_txt, c=diff_col: (
+                        l.setText(t), l.setStyleSheet(f"color:{c}; background:transparent;")))
 
-    # ─────────────────────────────────────────────────────────────
-    # Edit section
-    # ─────────────────────────────────────────────────────────────
+        _t.Thread(target=_fetch, daemon=True).start()
 
-    def _render_edit(self, parent, game: Game):
-        ctk.CTkLabel(parent, text=i18n.t("detail.edit_section"),
-                     font=ctk.CTkFont(size=11, weight="bold"),
-                     text_color=COLORS["text"]).pack(anchor="w", padx=12, pady=(0, 6))
+    # ── Recommendation ────────────────────────────────────────────────────────
 
-        ctk.CTkLabel(parent, text=i18n.t("game.priority"),
-                     font=ctk.CTkFont(size=10), text_color=COLORS["text_dim"],
-                     ).pack(anchor="w", padx=12)
+    def _render_recommendation(self, lay, game: Game, P: int):
+        try:
+            from services.recommendation import get_recommendation
+            rec = get_recommendation(game)
+        except Exception:
+            return
 
-        p_row = ctk.CTkFrame(parent, fg_color="transparent")
-        p_row.pack(anchor="w", padx=12, pady=(3, 8))
+        colors   = {"buy_now": COLORS["green"], "good_deal": COLORS["blue"],
+                    "wait": COLORS["gold"], "no_data": COLORS["text_dim"]}
+        icons    = {"buy_now": "✓", "good_deal": "◎", "wait": "⏳", "no_data": "—"}
+        accent   = colors.get(rec["verdict"], COLORS["text_dim"])
+        icon     = icons.get(rec["verdict"], "—")
+
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background:{COLORS['card']};
+                border:1px solid {COLORS['border']};
+                border-left:3px solid {accent};
+                border-radius:8px;
+                margin:0 {P}px;
+            }}
+        """)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(14, 10, 10, 10)
+        cl.setSpacing(4)
+
+        header = QHBoxLayout()
+        header.addWidget(_lbl(icon, 15, bold=True, color=accent))
+        header.addWidget(_lbl(rec["headline"], 11, bold=True, color=accent))
+        header.addStretch()
+        cl.addLayout(header)
+
+        if rec.get("reason"):
+            rl = _lbl(rec["reason"], 10, color=COLORS["text_dim"], wrap=1)
+            cl.addWidget(rl)
+
+        if rec.get("next_sale"):
+            sale_box = QFrame()
+            sale_box.setStyleSheet(f"""
+                QFrame {{ background:{COLORS['bg']};
+                    border:1px solid {COLORS['border']}; border-radius:6px; }}
+            """)
+            sb = QVBoxLayout(sale_box)
+            sb.setContentsMargins(10, 6, 10, 8)
+            sb.addWidget(_lbl("NEXT LIKELY SALE", 9, color=COLORS["text_dim"]))
+            sb.addWidget(_lbl(rec["next_sale"], 11, bold=True))
+            cl.addWidget(sale_box)
+
+        lay.addWidget(card)
+
+    # ── Edit section ──────────────────────────────────────────────────────────
+
+    def _render_edit(self, lay, game: Game, P: int):
+        w = QWidget()
+        w.setStyleSheet("background:transparent;")
+        wl = QVBoxLayout(w)
+        wl.setContentsMargins(P, 0, P, 0)
+        wl.setSpacing(4)
+
+        wl.addWidget(_lbl(i18n.t("detail.edit_section"), 11, bold=True))
+        wl.addWidget(_lbl(i18n.t("game.priority"), 10, color=COLORS["text_dim"]))
+
+        p_row = QHBoxLayout()
+        p_row.setSpacing(4)
         for p in PRIORITY_OPTIONS:
             color = PRIORITY_COLORS.get(p, "#666")
-            btn = ctk.CTkButton(
-                p_row, text=p, width=36, height=28,
-                fg_color=color if game.priority == p else "transparent",
-                text_color="#fff", hover_color=color,
-                border_color=color, border_width=1, corner_radius=5,
-                font=ctk.CTkFont(size=10, weight="bold"),
-                command=lambda pv=p: self._update_priority(game, pv),
-            )
-            btn.pack(side="left", padx=(0, 3))
+            btn = QPushButton(p)
+            btn.setFixedSize(36, 28)
+            active = game.priority == p
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background:{"transparent" if not active else color};
+                    color:#fff; border:1px solid {color};
+                    border-radius:5px;
+                    font-family:'Space Mono'; font-size:10px; font-weight:bold;
+                }}
+                QPushButton:hover {{ background:{color}; }}
+            """)
+            btn.clicked.connect(lambda _, pv=p: self._update_priority(game, pv))
+            p_row.addWidget(btn)
             self.__dict__[f"_det_pb_{p}"] = btn
+        p_row.addStretch()
+        wl.addLayout(p_row)
 
-        ctk.CTkLabel(parent, text=i18n.t("game.notes"),
-                     font=ctk.CTkFont(size=10), text_color=COLORS["text_dim"],
-                     ).pack(anchor="w", padx=12)
-        self._notes_box = ctk.CTkTextbox(
-            parent, height=60,
-            fg_color=COLORS["card"],
-            border_color=COLORS["border"], border_width=1,
-            text_color=COLORS["text"],
-        )
-        self._notes_box.pack(fill="x", padx=12, pady=(3, 0))
+        wl.addWidget(_lbl(i18n.t("game.notes"), 10, color=COLORS["text_dim"]))
+        self._notes_box = QTextEdit()
+        self._notes_box.setFixedHeight(60)
+        self._notes_box.setStyleSheet(f"""
+            QTextEdit {{
+                background:{COLORS['card']}; color:{COLORS['text']};
+                border:1px solid {COLORS['border']}; border-radius:4px;
+                font-family:'Space Mono'; font-size:10px; padding:4px;
+            }}
+        """)
         if game.notes:
-            self._notes_box.insert("1.0", game.notes)
+            self._notes_box.setPlainText(game.notes)
+        wl.addWidget(self._notes_box)
 
-        ctk.CTkButton(
-            parent, text=i18n.t("actions.save"),
-            command=lambda: self._save_edits(game),
-            fg_color=COLORS["blue"], text_color="#0a1929",
-            hover_color="#4fa8d8", corner_radius=6,
-            font=ctk.CTkFont(size=11, weight="bold"), height=30,
-        ).pack(fill="x", padx=12, pady=(6, 0))
+        save_btn = QPushButton(i18n.t("actions.save"))
+        save_btn.setFixedHeight(30)
+        save_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{COLORS['blue']}; color:#0a1929;
+                border:none; border-radius:6px;
+                font-family:'Space Mono'; font-size:11px; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:#4fa8d8; }}
+        """)
+        save_btn.clicked.connect(lambda: self._save_edits(game))
+        wl.addWidget(save_btn)
+        lay.addWidget(w)
 
-    # ─────────────────────────────────────────────────────────────
-    # Helpers
-    # ─────────────────────────────────────────────────────────────
-
-    def _divider(self, parent):
-        ctk.CTkFrame(parent, fg_color=COLORS["border"], height=1, corner_radius=0).pack(
-            fill="x", padx=12, pady=10,
-        )
-
-    def _info_row(self, parent, label: str, value: str):
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=12, pady=1)
-        ctk.CTkLabel(row, text=label + ":", width=100,
-                     font=ctk.CTkFont(size=10), text_color=COLORS["text_dim"],
-                     anchor="w").pack(side="left")
-        ctk.CTkLabel(row, text=value,
-                     font=ctk.CTkFont(size=10), text_color=COLORS["text"],
-                     anchor="w", wraplength=150, justify="left").pack(side="left")
-
-    # ─────────────────────────────────────────────────────────────
-    # Actions
-    # ─────────────────────────────────────────────────────────────
+    # ── Actions ───────────────────────────────────────────────────────────────
 
     def _update_priority(self, game: Game, p: str):
         game.priority = p
         repo.update(game)
         for pr in PRIORITY_OPTIONS:
             color = PRIORITY_COLORS.get(pr, "#666")
-            btn = self.__dict__.get(f"_det_pb_{pr}")
+            btn   = self.__dict__.get(f"_det_pb_{pr}")
             if btn:
-                btn.configure(fg_color=color if pr == p else "transparent")
+                active = pr == p
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background:{"transparent" if not active else color};
+                        color:#fff; border:1px solid {color};
+                        border-radius:5px;
+                        font-family:'Space Mono'; font-size:10px; font-weight:bold;
+                    }}
+                    QPushButton:hover {{ background:{color}; }}
+                """)
         self.on_refresh()
 
     def _save_edits(self, game: Game):
-        game.notes = self._notes_box.get("1.0", "end").strip()
+        game.notes = self._notes_box.toPlainText().strip()
         repo.update(game)
         self.on_refresh()
 
     def _refresh_prices(self, game: Game):
         def _work():
             settings = get_settings()
-            data = steam.get_app_details(game.app_id, country=settings.get("country", "mx"))
+            data = steam.get_app_details(
+                game.app_id, country=settings.get("country", "mx"))
             if data:
                 game.price = steam.parse_price(data)
             history = steamdb.get_price_history(game.app_id)
             if history:
                 game.price_history = history
             repo.update(game)
-            self.after(0, lambda: self.load_game(game))
-            self.after(0, self.on_refresh)
+            self._sig.reload.emit(game)
+            QTimer.singleShot(0, self.on_refresh)
         threading.Thread(target=_work, daemon=True).start()
 
     def _download_cover(self, game: Game):
@@ -517,44 +635,18 @@ class GameDetailPanel(ctk.CTkFrame):
             if cover:
                 game.cover_path = cover
                 repo.update(game)
-                self.after(0, lambda: self.load_game(game))
-                self.after(0, self.on_refresh)
+                self._sig.reload.emit(game)
+                QTimer.singleShot(0, self.on_refresh)
         threading.Thread(target=_work, daemon=True).start()
 
     def _mark_purchased(self, game: Game):
         from ui.mark_purchased_dialog import MarkPurchasedDialog
-
         def _on_success(purchase):
             self.on_refresh()
-            self.load_game(game)   # reload panel to show "purchased" state
-
-        MarkPurchasedDialog(self, game=game, on_success=_on_success)
-
-    def _check_steam_library(self, game: Game) -> bool:
-        """
-        Check if game is in user's Steam library.
-        Returns True if found — triggers auto-mark as purchased.
-        """
-        from ui.settings_loader import get_settings
-        import requests
-        settings = get_settings()
-        steam_id = settings.get("steam_id64", "")
-        api_key  = settings.get("steam_api_key", "")
-        if not steam_id or not api_key:
-            return False
-        try:
-            resp = requests.get(
-                "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/",
-                params={"key": api_key, "steamid": steam_id,
-                        "include_appinfo": False, "format": "json"},
-                timeout=8,
-            )
-            owned = resp.json().get("response", {}).get("games", [])
-            return any(str(g["appid"]) == game.app_id for g in owned)
-        except Exception:
-            return False
+            self._sig.reload.emit(game)
+        dlg = MarkPurchasedDialog(self, game=game, on_success=_on_success)
+        dlg.exec()
 
     def _delete(self, game: Game):
         repo.delete(game.id)
         self.on_close()
-        self.on_refresh()

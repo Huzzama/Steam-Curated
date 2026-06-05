@@ -7,9 +7,9 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 from data.models import Purchase
-from config import BASE_DIR
-
-_DB_PATH = BASE_DIR / "purchases.json"
+def _get_db_path():
+    from config import BASE_DIR
+    return BASE_DIR / "purchases.json"
 _cache: Optional[list[dict]] = None
 
 
@@ -17,10 +17,10 @@ def _load() -> list[dict]:
     global _cache
     if _cache is not None:
         return _cache
-    if not _DB_PATH.exists():
+    if not _get_db_path().exists():
         _cache = []
         return _cache
-    with open(_DB_PATH, encoding="utf-8") as f:
+    with open(_get_db_path(), encoding="utf-8") as f:
         _cache = json.load(f)
     return _cache
 
@@ -28,7 +28,7 @@ def _load() -> list[dict]:
 def _save(data: list[dict]):
     global _cache
     _cache = data
-    with open(_DB_PATH, "w", encoding="utf-8") as f:
+    with open(_get_db_path(), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 

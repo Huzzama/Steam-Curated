@@ -119,7 +119,12 @@ def import_wishlist(
     """
     import data.repository as repo
 
-    existing_ids = {g.app_id for g in repo.get_all()}
+    # Use O(1) set index from repo instead of loading all games
+    try:
+        repo._load()
+        existing_ids = repo._set_index or {g.app_id for g in repo.get_all()}
+    except Exception:
+        existing_ids = {g.app_id for g in repo.get_all()}
 
     items = fetch_wishlist_with_details(
         steam_id64, api_key, country, on_progress=on_progress

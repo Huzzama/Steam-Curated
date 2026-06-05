@@ -8,36 +8,60 @@ from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
 from data.models import Game, PriceInfo, PriceHistory
-from config import BASE_DIR
-
-_DB_PATH = BASE_DIR / "wishlist.json"
+def _get_db_path():
+    from config import BASE_DIR
+    return BASE_DIR / "wishlist.json"
 
 # ── In-memory cache ───────────────────────────────────────────────────────────
 _cache: Optional[list[dict]] = None
+_id_index: Optional[dict] = None     # app_id -> dict, O(1) lookup
+_set_index: Optional[set] = None     # set of app_ids for O(1) membership
 
 
 def _load() -> list[dict]:
-    global _cache
+    global _cache, _id_index, _set_index
     if _cache is not None:
         return _cache
-    if not _DB_PATH.exists():
+    if not _get_db_path().exists():
         _cache = []
+        _id_index  = {}
+        _set_index = set()
         return _cache
-    with open(_DB_PATH, encoding="utf-8") as f:
+    with open(_get_db_path(), encoding="utf-8") as f:
         _cache = json.load(f)
+    # Build O(1) lookup indexes
+    _id_index  = {str(d["app_id"]): d for d in _cache}
+    _set_index = set(_id_index.keys())
     return _cache
 
 
 def _save(data: list[dict]) -> None:
-    global _cache
-    _cache = data
-    with open(_DB_PATH, "w", encoding="utf-8") as f:
+    global _cache, _id_index, _set_index
+    _cache     = data
+    _id_index  = {str(d["app_id"]): d for d in data}
+    _set_index = set(_id_index.keys())
+    with open(_get_db_path(), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def _invalidate():
-    global _cache
-    _cache = None
+    global _cache, _id_index, _set_index
+    _cache     = None
+    _id_index  = None
+    _set_index = None
+
+
+def exists(app_id: str) -> bool:
+    """O(1) check if app_id is in wishlist."""
+    _load()
+    return str(app_id) in _set_index
+
+
+def get_by_app_id(app_id: str) -> Optional[Game]:
+    """O(1) lookup by app_id."""
+    _load()
+    d = _id_index.get(str(app_id))
+    return _to_game(d) if d else None
 
 
 # ── Converters ────────────────────────────────────────────────────────────────
@@ -68,7 +92,8 @@ def _from_game(g: Game) -> dict:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get_all() -> list[Game]:
-    return [_to_game(d) for d in _load()]
+    # Generator then list — avoids building intermediate list
+    return list(_to_game(d) for d in _load())
 
 
 def get_by_id(game_id: int) -> Optional[Game]:

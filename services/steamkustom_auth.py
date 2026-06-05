@@ -116,3 +116,32 @@ def verify_async(token: str, on_done: Callable[[bool, Optional[dict]], None]):
 def is_connected() -> bool:
     token = get_token()
     return bool(token) and bool(verify_token(token))
+
+
+def get_steam_api_key(token: str = None) -> Optional[str]:
+    """
+    Get the Steam API key from the PimpMySteam backend.
+    The key is stored server-side — users never need to enter it locally.
+    """
+    if not token:
+        token = get_token()
+    if not token:
+        return None
+    try:
+        import urllib.request, ssl
+        req = urllib.request.Request(
+            f"{API_URL}/auth/steam-api-key",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        try:
+            import certifi
+            ctx = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+            if resp.status == 200:
+                import json as _j
+                return _j.loads(resp.read().decode()).get("api_key")
+    except Exception as e:
+        print(f"[SteamKustom] get_steam_api_key error: {e}")
+    return None

@@ -1,49 +1,58 @@
 """
-Repository with in-memory cache.
+Repository with in-memory cache + O(1) indexes.
 Reads JSON once, keeps everything in RAM.
-Writes are immediate but reads never hit disk twice.
 """
 import json
-from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
 from data.models import Game, PriceInfo, PriceHistory
-from config import BASE_DIR
 
-_DB_PATH = BASE_DIR / "wishlist.json"
 
-# ── In-memory cache ───────────────────────────────────────────────────────────
-_cache: Optional[list[dict]] = None
+def _get_db_path():
+    """Lazy path — evaluated after config is fully initialized."""
+    from config import BASE_DIR
+    return BASE_DIR / "wishlist.json"
+
+
+# ── In-memory cache + indexes ─────────────────────────────────────────────────
+_cache:     Optional[list[dict]] = None
+_id_index:  Optional[dict]       = None   # app_id -> dict  O(1)
+_set_index: Optional[set]        = None   # set of app_ids  O(1)
 
 
 def _load() -> list[dict]:
-    global _cache
+    global _cache, _id_index, _set_index
     if _cache is not None:
         return _cache
-    if not _DB_PATH.exists():
-        _cache = []
+    p = _get_db_path()
+    if not p.exists():
+        _cache = []; _id_index = {}; _set_index = set()
         return _cache
-    with open(_DB_PATH, encoding="utf-8") as f:
+    with open(p, encoding="utf-8") as f:
         _cache = json.load(f)
+    _id_index  = {str(d["app_id"]): d for d in _cache}
+    _set_index = set(_id_index)
     return _cache
 
 
 def _save(data: list[dict]) -> None:
-    global _cache
-    _cache = data
-    with open(_DB_PATH, "w", encoding="utf-8") as f:
+    global _cache, _id_index, _set_index
+    _cache     = data
+    _id_index  = {str(d["app_id"]): d for d in data}
+    _set_index = set(_id_index)
+    with open(_get_db_path(), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def _invalidate():
-    global _cache
-    _cache = None
+    global _cache, _id_index, _set_index
+    _cache = _id_index = _set_index = None
 
 
 # ── Converters ────────────────────────────────────────────────────────────────
 
 def _to_game(d: dict) -> Game:
-    price = PriceInfo(**d["price"]) if d.get("price") else None
+    price = PriceInfo(**d["price"])         if d.get("price")         else None
     hist  = PriceHistory(**d["price_history"]) if d.get("price_history") else None
     return Game(
         id=d["id"], name=d["name"], app_id=d["app_id"],
@@ -68,7 +77,7 @@ def _from_game(g: Game) -> dict:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get_all() -> list[Game]:
-    return [_to_game(d) for d in _load()]
+    return list(_to_game(d) for d in _load())
 
 
 def get_by_id(game_id: int) -> Optional[Game]:
@@ -79,10 +88,16 @@ def get_by_id(game_id: int) -> Optional[Game]:
 
 
 def get_by_app_id(app_id: str) -> Optional[Game]:
-    for d in _load():
-        if d["app_id"] == app_id:
-            return _to_game(d)
-    return None
+    """O(1) lookup by app_id."""
+    _load()
+    d = _id_index.get(str(app_id))
+    return _to_game(d) if d else None
+
+
+def exists(app_id: str) -> bool:
+    """O(1) membership check."""
+    _load()
+    return str(app_id) in _set_index
 
 
 def add(game: Game) -> Game:

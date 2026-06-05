@@ -8,7 +8,8 @@
     "dashboard": "Dashboard",
     "deals": "Ofertas",
     "history": "Historial",
-    "settings": "Ajustes"
+    "settings": "Ajustes",
+    "recap": "Recap"
   },
   "nav_sections": {
     "collection": "Colección",
@@ -107,7 +108,9 @@
     "show_key": "👁 Mostrar",
     "hide_key": "🙈 Ocultar",
     "key_saved": "✓ API key guardada",
-    "key_missing": "⚠ Sin API key — las portadas no se descargarán"
+    "key_missing": "⚠ Sin API key — las portadas no se descargarán",
+    "compare_regions": "Regiones para comparar precios",
+    "compare_regions_desc": "Selecciona las regiones que quieres comparar en el panel de cada juego."
   },
   "add_game": {
     "title": "Agregar juego a la Wishlist",
@@ -158,7 +161,10 @@
     "refresh_prices": "↻ Actualizar precios",
     "delete_game": "🗑 Eliminar de la wishlist",
     "base_price": "Precio base",
-    "edit_section": "Editar"
+    "edit_section": "Editar",
+    "price_by_region": "Precio por región",
+    "i_bought_this": "🛒  Ya lo compré",
+    "purchased_label": "✓  Comprado — {edition}"
   },
   "sale_events": {
     "lunar_new_year": "Año Nuevo Lunar",
@@ -214,5 +220,56 @@
     "api_key_label": "Steam Web API Key",
     "api_key_desc": "Obtén tu key gratis en steamcommunity.com/dev/apikey",
     "disconnect_confirm": "¿Desconectar cuenta de Steam?"
+  },
+  "recap": {
+    "title": "Recap",
+    "this_year": "Tu {year} en review",
+    "bought_count": "Compraste {n} juego(s) este año",
+    "saved_msg": "y ahorraste ${amount} {currency} comprando en oferta 🎉",
+    "spent": "Gastado en {year}",
+    "saved": "Ahorrado en {year}",
+    "avg_discount": "Descuento promedio",
+    "best_deal": "Mejor oferta",
+    "genres": "Géneros que compraste este año",
+    "games_bought": "Juegos que compraste este año",
+    "monthly_spending": "Gasto mensual",
+    "all_time": "Estadísticas totales",
+    "total_spent": "Total gastado",
+    "total_saved": "Total ahorrado",
+    "games_count": "Juegos comprados",
+    "avg_per_game": "Promedio por juego",
+    "no_data": "Aún no hay compras registradas en {year}",
+    "no_data_hint": "Haz clic en '🛒 Ya lo compré' en cualquier juego de tu wishlist para empezar a rastrear tus compras."
+  },
+  "regions": {
+    "mx": "🇲🇽 México",
+    "us": "🇺🇸 USA",
+    "ar": "🇦🇷 Argentina",
+    "br": "🇧🇷 Brasil",
+    "es": "🇪🇸 España",
+    "gb": "🇬🇧 UK",
+    "de": "🇩🇪 Alemania",
+    "fr": "🇫🇷 Francia",
+    "jp": "🇯🇵 Japón",
+    "au": "🇦🇺 Australia",
+    "ca": "🇨🇦 Canadá",
+    "ru": "🇷🇺 Rusia",
+    "tr": "🇹🇷 Turquía",
+    "cn": "🇨🇳 China",
+    "in": "🇮🇳 India"
+  },
+  "mark_purchased": {
+    "title": "Ya compré este juego",
+    "edition_label": "Edición / Versión",
+    "fetching_editions": "Obteniendo ediciones desde Steam…",
+    "select_edition": "Selecciona la edición que compraste:",
+    "price_paid": "Precio pagado",
+    "full_price": "Precio sin descuento",
+    "purchase_date": "Fecha de compra",
+    "date_format": "Formato: YYYY-MM-DD",
+    "saved_msg": "Ahorraste ${amount} {currency} ({pct}% de descuento) 🎉",
+    "full_price_label": "Comprado a precio completo",
+    "confirm": "✓  Confirmar compra",
+    "invalid": "Precio o fecha inválidos."
   }
 }

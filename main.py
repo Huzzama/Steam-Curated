@@ -4,14 +4,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import i18n
-from ui.history_settings_views import load_settings
+from ui.settings_loader import load_settings
 
 
-def _auto_sync_on_startup():
-    """
-    If the user is authenticated with Google Drive,
-    silently download latest data in the background.
-    """
+def _auto_sync_drive_startup():
     try:
         from services.drive_sync import is_configured, is_authenticated, download_all
         if is_configured() and is_authenticated():
@@ -25,8 +21,7 @@ def _auto_sync_on_startup():
         print(f"[Drive] Auto-sync skipped: {e}")
 
 
-def _auto_sync_on_exit(app):
-    """Upload data when the app closes."""
+def _auto_sync_drive_exit():
     try:
         from services.drive_sync import is_configured, is_authenticated, upload_all
         if is_configured() and is_authenticated():
@@ -34,24 +29,54 @@ def _auto_sync_on_exit(app):
             upload_all()
     except Exception as e:
         print(f"[Drive] Exit sync skipped: {e}")
-    finally:
-        app.destroy()
 
 
 def main():
     settings = load_settings()
     i18n.load_locale(settings.get("locale", "es"))
 
-    # Auto-download on startup (background)
-    _auto_sync_on_startup()
+    # Background Drive sync on startup
+    _auto_sync_drive_startup()
 
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFontDatabase
     from ui.app_window import AppWindow
-    app = AppWindow()
 
-    # Auto-upload on close
-    app.protocol("WM_DELETE_WINDOW", lambda: _auto_sync_on_exit(app))
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
 
-    app.mainloop()
+    # Register Space Mono if bundled, suppress warning if not available
+    from pathlib import Path as _P
+    _font_dir = _P(__file__).parent / "assets" / "fonts" / "SpaceMono"
+    for _ext in ("*.ttf", "*.otf"):
+        for _f in _font_dir.glob(_ext) if _font_dir.exists() else []:
+            QFontDatabase.addApplicationFont(str(_f))
+
+    # Dark palette
+    from PySide6.QtGui import QPalette, QColor
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window,      QColor(9,9,11))
+    palette.setColor(QPalette.ColorRole.WindowText,  QColor(244,244,245))
+    palette.setColor(QPalette.ColorRole.Base,        QColor(20,20,24))
+    palette.setColor(QPalette.ColorRole.Text,        QColor(244,244,245))
+    palette.setColor(QPalette.ColorRole.Button,      QColor(20,20,24))
+    palette.setColor(QPalette.ColorRole.ButtonText,  QColor(244,244,245))
+    palette.setColor(QPalette.ColorRole.Highlight,   QColor(96,165,250))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(0,0,0))
+    app.setPalette(palette)
+
+    # Force transparent label backgrounds app-wide — Qt inherits bg from parent otherwise
+    app.setStyleSheet("""
+        QLabel { background-color: transparent; }
+        QToolTip { background-color: #141418; color: #f4f4f5; border: 1px solid #27272a; }
+    """)
+
+    window = AppWindow()
+    window.show()
+
+    app.aboutToQuit.connect(_auto_sync_drive_exit)
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
