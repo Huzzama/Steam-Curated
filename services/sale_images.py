@@ -1,89 +1,180 @@
 """
-Generate visually rich sale event banner images locally using Pillow.
-No network requests — images are generated once and cached.
+Sale image loader — downloads images from PimpMySteam server.
+
+Strategy: always re-download on startup (delete old cache first).
+This ensures server-side image updates are reflected immediately.
+Images are stored in a session temp dir that's cleared each run.
 """
-import random
-import math
+import threading
+import urllib.request
+import ssl
+import json
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
-from config import ASSETS_DIR
+from typing import Optional, Callable
 
-SALE_BANNERS_DIR = ASSETS_DIR / "sale_banners"
-SALE_BANNERS_DIR.mkdir(parents=True, exist_ok=True)
+API_URL = "https://api.pimpmysteam.com"
 
-BANNER_W = 560
-BANNER_H = 70
+# In-memory registry: key → local Path (populated after download)
+_session_images: dict[str, Path] = {}
+_download_done  = False
+_done_callbacks: list[Callable] = []
+_lock           = threading.Lock()
 
+# Sale events loaded from server JSON (same session lifetime as images)
+_sale_events: list[dict] = []
 
-def get_banner_path(event_key: str, color_top: str, color_bot: str, emoji: str) -> str:
-    """Return local path to a banner image. Generated once, cached forever."""
-    cache_path = SALE_BANNERS_DIR / f"{event_key}.png"
-    if not cache_path.exists():
-        _generate_banner(cache_path, color_top, color_bot, emoji)
-    return str(cache_path)
+SALES_DATES_URL = f"{API_URL}/static/sale-images/sales_dates.json"
 
 
-def _hex_to_rgb(hex_color: str) -> tuple:
-    h = hex_color.lstrip("#")
-    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+def _cache_dir() -> Path:
+    import sys
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "SteamCurator"
+    elif sys.platform == "win32":
+        import os
+        base = Path(os.environ.get("APPDATA", Path.home())) / "SteamCurator"
+    else:
+        base = Path.home() / ".local" / "share" / "SteamCurator"
+    d = base / "sale_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
-def _lerp_color(c1, c2, t):
-    return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
+def _clear_cache():
+    """Delete all cached images — called once per session on startup."""
+    try:
+        cache = _cache_dir()
+        for f in cache.iterdir():
+            if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+                f.unlink()
+        print(f"[SaleImages] Cache cleared for fresh session")
+    except Exception as e:
+        print(f"[SaleImages] Cache clear error: {e}")
 
 
-def _generate_banner(path: Path, color_top: str, color_bot: str, emoji: str):
-    W, H = BANNER_W, BANNER_H
-    img  = Image.new("RGB", (W, H))
-    draw = ImageDraw.Draw(img)
+def get_local_path(key: str) -> Optional[Path]:
+    """Return the local path for a given image key, or None if not downloaded yet."""
+    with _lock:
+        return _session_images.get(key)
 
-    c1 = _hex_to_rgb(color_top)
-    c2 = _hex_to_rgb(color_bot)
 
-    # Diagonal gradient (top-left to bottom-right)
-    for y in range(H):
-        for x in range(0, W, 2):
-            t = (x / W * 0.4 + y / H * 0.6)
-            t = min(1.0, max(0.0, t))
-            color = _lerp_color(c1, c2, t)
-            draw.line([(x, y), (x+1, y)], fill=color)
+def get_sale_events() -> list[dict]:
+    """
+    Return sale events loaded from the server JSON.
+    Returns an empty list if the download hasn't completed or failed —
+    callers should fall back to config.STEAM_SALE_EVENTS in that case.
+    """
+    with _lock:
+        return list(_sale_events)
 
-    # Subtle noise overlay for texture
-    rng = random.Random(hash(emoji))
-    noise = Image.new("RGB", (W, H))
-    nd = ImageDraw.Draw(noise)
-    for _ in range(W * H // 8):
-        nx = rng.randint(0, W-1)
-        ny = rng.randint(0, H-1)
-        v  = rng.randint(180, 255)
-        nd.point((nx, ny), fill=(v, v, v))
-    noise = noise.filter(ImageFilter.GaussianBlur(radius=1))
-    img   = Image.blend(img, noise, alpha=0.04)
 
-    # Glowing circle accent (top-right area)
-    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    gd   = ImageDraw.Draw(glow)
-    cx, cy = int(W * 0.82), int(H * 0.3)
-    for r in range(90, 0, -3):
-        alpha = int(18 * (1 - r/90))
-        bright = _lerp_color(c1, (255, 255, 255), 0.5)
-        gd.ellipse([cx-r, cy-r, cx+r, cy+r], fill=(*bright, alpha))
-    img = Image.alpha_composite(img.convert("RGBA"), glow).convert("RGB")
+def _fetch(url: str, timeout: int = 15) -> Optional[bytes]:
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "SteamCurator/2.0"})
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            return r.read()
+    except Exception as e:
+        print(f"[SaleImages] fetch error {url[:80]}: {e}")
+        return None
 
-    # Second subtle accent — bottom left
-    glow2 = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    gd2   = ImageDraw.Draw(glow2)
-    for r in range(60, 0, -4):
-        alpha = int(10 * (1 - r/60))
-        gd2.ellipse([(-r//2), (H-r//2), r//2, H+r//2], fill=(*c1, alpha))
-    img = Image.alpha_composite(img.convert("RGBA"), glow2).convert("RGB")
 
-    # Horizontal shimmer line
-    shimmer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    sd = ImageDraw.Draw(shimmer)
-    for x in range(W):
-        alpha = int(30 * math.sin(math.pi * x / W))
-        sd.line([(x, H//3 - 1), (x, H//3 + 1)], fill=(255, 255, 255, alpha))
-    img = Image.alpha_composite(img.convert("RGBA"), shimmer).convert("RGB")
+def _download_sale_dates():
+    """
+    Fetch sales_dates.json from the server and populate _sale_events.
+    Called at the end of _download_all() so events and images share
+    the same session lifecycle.
+    """
+    global _sale_events
+    print("[SaleImages] Fetching sales_dates.json from server…")
+    try:
+        data = _fetch(SALES_DATES_URL)
+        if not data:
+            print("[SaleImages] No sales_dates.json from server — "
+                  "falling back to config.STEAM_SALE_EVENTS")
+            return
+        payload = json.loads(data)
+        events  = payload.get("events", [])
+        if events:
+            with _lock:
+                _sale_events = events
+            print(f"[SaleImages] Loaded {len(events)} sale events from server")
+        else:
+            print("[SaleImages] sales_dates.json contained no events — "
+                  "falling back to config.STEAM_SALE_EVENTS")
+    except Exception as e:
+        print(f"[SaleImages] sales_dates.json fetch error: {e} — "
+              "falling back to config.STEAM_SALE_EVENTS")
 
-    img.save(path, "PNG")
+
+def _download_all():
+    global _download_done
+    print("[SaleImages] Fetching image list from server…")
+    try:
+        data = _fetch(f"{API_URL}/stats/sale-images")
+        if not data:
+            print("[SaleImages] No data from server")
+            return
+        images = json.loads(data).get("images", {})
+        print(f"[SaleImages] Server has {len(images)} images: {list(images.keys())}")
+        cache  = _cache_dir()
+
+        for key, path in images.items():
+            url = path if path.startswith("http") else f"{API_URL}{path}"
+            ext = "." + path.split(".")[-1] if "." in path.split("/")[-1] else ".jpg"
+            img_data = _fetch(url)
+            if img_data:
+                dest = cache / f"{key}{ext}"
+                dest.write_bytes(img_data)
+                with _lock:
+                    _session_images[key] = dest
+                print(f"[SaleImages] Downloaded: {key}")
+            else:
+                print(f"[SaleImages] Failed: {key}")
+    except Exception as e:
+        print(f"[SaleImages] download error: {e}")
+    finally:
+        with _lock:
+            _download_done = True
+
+    # ── Fetch sale event dates (runs after images, regardless of image errors) ─
+    _download_sale_dates()
+
+
+def refresh_all(on_done: Callable = None):
+    """
+    Clear cache and re-download all images from server.
+    Calls on_done() in the download thread when complete.
+    """
+    global _download_done, _session_images, _sale_events
+    with _lock:
+        _download_done  = False
+        _session_images = {}
+        _sale_events    = []
+
+    _clear_cache()
+
+    def _work():
+        _download_all()
+        if on_done:
+            on_done()
+
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def is_ready() -> bool:
+    with _lock:
+        return _download_done
+
+
+# Backward compat
+def cache_dir():
+    return _cache_dir()
+
+def get_banner_path(event_key, **_):
+    p = get_local_path(event_key)
+    return str(p) if p else ""

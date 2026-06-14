@@ -55,6 +55,7 @@ class Game:
     notes: str = ""
     cover_path: Optional[str] = None
     date_added: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
+    play_status: str = ""   # "", "playing", "completed", "abandoned", "on_hold"
 
     @property
     def buy_recommendation(self) -> str:

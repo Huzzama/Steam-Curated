@@ -85,21 +85,21 @@ PRIORITY_OPTIONS = ["S", "A", "B", "C"]
 
 # ── Steam Sale Events ─────────────────────────────────────────────────────────
 STEAM_SALE_EVENTS = [
-    {"key": "summer_sale_2026", "placeholder_img": "https://cdn.cloudflare.steamstatic.com/steam/clusters/grand_summer_sale_2025/page_bg_english.jpg",    "start": "2026-06-25", "end": "2026-07-09",
+    {"key": "summer_sale_2026", "server_img": "summer_sale",    "start": "2026-06-25", "end": "2026-07-09",
      "confirmed": False, "color_top": "#1A6B9A", "color_bot": "#0D3550", "emoji": "☀️"},
-    {"key": "halloween_sale_2026", "placeholder_img": "https://cdn.cloudflare.steamstatic.com/steam/clusters/sale_halloween2024/assets/SteamHalloween2024_PageBackground.jpg", "start": "2026-10-27", "end": "2026-10-31",
+    {"key": "halloween_sale_2026", "server_img": "halloween_sale", "start": "2026-10-27", "end": "2026-10-31",
      "confirmed": False, "color_top": "#6C3483", "color_bot": "#2C1654", "emoji": "🎃"},
-    {"key": "black_friday_2026", "placeholder_img": "https://cdn.cloudflare.steamstatic.com/steam/clusters/sale_autumn2024/assets/SteamAutumnSale2024_PageBackground.jpg",   "start": "2026-11-25", "end": "2026-11-29",
+    {"key": "black_friday_2026", "server_img": "black_friday_sale",   "start": "2026-11-25", "end": "2026-11-29",
      "confirmed": False, "color_top": "#1C1C1C", "color_bot": "#111111", "emoji": "🖤"},
-    {"key": "autumn_sale_2026", "placeholder_img": "https://cdn.cloudflare.steamstatic.com/steam/clusters/sale_autumn2024/assets/SteamAutumnSale2024_PageBackground.jpg",    "start": "2026-11-25", "end": "2026-12-02",
+    {"key": "autumn_sale_2026", "server_img": "autum_sale",    "start": "2026-11-25", "end": "2026-12-02",
      "confirmed": False, "color_top": "#A04000", "color_bot": "#5D2E0C", "emoji": "🍂"},
-    {"key": "winter_sale_2026", "placeholder_img": "https://cdn.cloudflare.steamstatic.com/steam/clusters/winter_sale_2025/assets/WinterSale2025_PageBackground.jpg",    "start": "2026-12-17", "end": "2027-01-01",
+    {"key": "winter_sale_2026", "server_img": "winter_sale",    "start": "2026-12-17", "end": "2027-01-01",
      "confirmed": False, "color_top": "#154360", "color_bot": "#0B2742", "emoji": "❄️"},
-    {"key": "lunar_new_year_2027", "placeholder_img": "https://cdn.cloudflare.steamstatic.com/steam/clusters/sale_lunarnewyear2025/assets/LNY2025_PageBackground.jpg", "start": "2027-01-28", "end": "2027-02-04",
+    {"key": "lunar_new_year_2027", "server_img": "lunar_sale", "start": "2027-01-28", "end": "2027-02-04",
      "confirmed": False, "color_top": "#C0392B", "color_bot": "#7B241C", "emoji": "🧧"},
-    {"key": "spring_sale_2027", "placeholder_img": "https://cdn.cloudflare.steamstatic.com/steam/clusters/sale_spring2025/assets/SpringSale2025_PageBackground.jpg",    "start": "2027-03-11", "end": "2027-03-18",
+    {"key": "spring_sale_2027", "server_img": "spring_sale",    "start": "2027-03-11", "end": "2027-03-18",
      "confirmed": False, "color_top": "#1E8449", "color_bot": "#0E5230", "emoji": "🌸"},
-    {"key": "summer_sale_2027", "placeholder_img": "https://cdn.cloudflare.steamstatic.com/steam/clusters/grand_summer_sale_2025/page_bg_english.jpg",    "start": "2027-06-24", "end": "2027-07-08",
+    {"key": "summer_sale_2027", "server_img": "summer_sale",    "start": "2027-06-24", "end": "2027-07-08",
      "confirmed": False, "color_top": "#1A6B9A", "color_bot": "#0D3550", "emoji": "☀️"},
 ]
 
@@ -113,9 +113,26 @@ LOCALES = {
     "fr": "Français",
     "pt": "Português",
     "ru": "Русский",
-    "zh": "中文 (简体)",
+    "zh_CN": "中文 (简体)",
+    "zh_TW": "中文 (繁體)",
     "ja": "日本語",
     "ko": "한국어",
     "tr": "Türkçe",
+    "hi": "हिन्दी",
+    "it": "Italiano",
+    "nl": "Nederlands",
+    "uk": "Українська",
+    "pl": "Polski",
+    "cs": "Čeština",
+    "sv": "Svenska",
+    "da": "Dansk",
+    "fi": "Suomi",
+    "no": "Norsk",
+    "ro": "Română",
+    "hu": "Magyar",
+    "th": "ไทย",
+    "vi": "Tiếng Việt",
+    "id": "Bahasa Indonesia"
 }
+
 DEFAULT_LOCALE = "es"

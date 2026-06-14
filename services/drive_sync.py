@@ -46,10 +46,10 @@ def _get_api_url() -> str:
         if SETTINGS_PATH.exists():
             with open(SETTINGS_PATH) as f:
                 data = json.load(f)
-            return data.get("api_url", "https://steamkustom-production.up.railway.app")
+            return data.get("api_url", "https://api.pimpmysteam.com")
     except Exception:
         pass
-    return "https://steamkustom-production.up.railway.app"
+    return "https://api.pimpmysteam.com"
 
 
 def _fetch_drive_token_from_api() -> Optional[str]:

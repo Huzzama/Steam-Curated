@@ -1,7 +1,3 @@
-"""
-Repository with in-memory cache + O(1) indexes.
-Reads JSON once, keeps everything in RAM.
-"""
 import json
 from typing import Optional
 from dataclasses import asdict

@@ -1,8 +1,3 @@
-"""
-Core UI widgets — PySide6.
-Drop-in replacements for the old CustomTkinter widgets.
-StatCard, SteamButton, SectionHeader, DealBanner.
-"""
 from __future__ import annotations
 from typing import Optional, Callable
 
@@ -13,6 +8,7 @@ from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, Property
 from PySide6.QtGui import QFont, QColor
 
 from config import COLORS, PRIORITY_COLORS
+from ui.animations import animate_value_change as _anim_value, shimmer_card
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -75,8 +71,13 @@ class StatCard(QFrame):
         self._value_lbl.setStyleSheet(f"color: {self._accent};")
         lay.addWidget(self._value_lbl)
 
-    def set_value(self, value: str, color: str = None):
-        self._value_lbl.setText(value)
+    def set_value(self, value: str, color: str = None,
+                  animate: bool = True):
+        target_color = color or self._accent
+        if animate and self._value_lbl.text() != value:
+            _anim_value(self._value_lbl, value, accent=target_color)
+        else:
+            self._value_lbl.setText(value)
         if color:
             self._value_lbl.setStyleSheet(f"color: {color};")
 
@@ -173,7 +174,7 @@ class DealBanner(QFrame):
 
         if game and game.price and game.price_history:
             info = (f"${game.price.current:,.0f} {game.price.currency} · "
-                    f"mín: ${game.price_history.all_time_low:,.0f}")
+                    + i18n.t("widgets.atl_label").format(amount=f"{game.price_history.all_time_low:,.0f}"))
             info_lbl = QLabel(info)
             info_lbl.setFont(_font(11))
             info_lbl.setStyleSheet(f"color: {COLORS['text_dim']};")

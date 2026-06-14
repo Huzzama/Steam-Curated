@@ -2,7 +2,7 @@
 AppWindow — PySide6 main window.
 """
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QStackedLayout,
     QFrame, QLabel, QPushButton,
 )
 from PySide6.QtCore import Qt, QTimer
@@ -10,6 +10,7 @@ from PySide6.QtGui import QFont
 
 from config import COLORS, APP_NAME, WINDOW_SIZE, MIN_WINDOW_SIZE
 import i18n
+from ui.animations import safe_show_view, slide_in_right, slide_out_right, nav_click_feedback, clear_layout
 
 DETAIL_WIDTH = 320
 _W, _H       = (int(x) for x in WINDOW_SIZE.split("x"))
@@ -28,6 +29,11 @@ class AppWindow(QMainWindow):
         self._detail_open = False
         self._views: dict  = {}
         self._nav_buttons: dict = {}
+
+        # Dirty-flag system: views are only refreshed when their data changed
+        # or when they are shown for the first time.
+        self._initialized_views: set = set()
+        self._dirty_views:       set = set()
 
         self._build_layout()
         self._build_sidebar()
@@ -68,12 +74,11 @@ class AppWindow(QMainWindow):
         right_lay.setSpacing(0)
         root.addWidget(right, 1)
 
-        # View container
+        # View container — NO layout manager so slide_transition can freely
+        # animate widget positions with setGeometry/move without a layout
+        # fighting the animation and causing flicker.
         self._container = QWidget()
         self._container.setStyleSheet(f"background:{COLORS['bg']};")
-        self._container_lay = QVBoxLayout(self._container)
-        self._container_lay.setContentsMargins(0, 0, 0, 0)
-        self._container_lay.setSpacing(0)
         right_lay.addWidget(self._container, 1)
 
         # Detail panel
@@ -89,6 +94,21 @@ class AppWindow(QMainWindow):
         self._detail_container_lay.setContentsMargins(0, 0, 0, 0)
         self._detail_container.hide()
         right_lay.addWidget(self._detail_container)
+
+    # ── Resize: keep views filling container ─────────────────────────────────
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, "_container"):
+            return
+        rect = self._container.rect()
+        for view in self._views.values():
+            # Don't resize while a slide animation is in progress
+            if not getattr(view, "_slide_anim", None):
+                try:
+                    view.setGeometry(rect)
+                except RuntimeError:
+                    pass
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
 
@@ -126,12 +146,23 @@ class AppWindow(QMainWindow):
         self._nav_section(lay, i18n.t("nav_sections.collection"))
         self._nav_item(lay, "wishlist",  i18n.t("nav.wishlist"),  "♡")
         self._nav_section(lay, i18n.t("nav_sections.tools"))
+        self._nav_item(lay, "library",   i18n.t("nav.library"),   "📚")
         self._nav_item(lay, "dashboard", i18n.t("nav.dashboard"), "▦")
         self._nav_item(lay, "deals",     i18n.t("nav.deals"),     "🏷")
+        self._nav_item(lay, "non_steam", i18n.t("nav.non_steam"), "🌐")
         self._nav_item(lay, "history",   i18n.t("nav.history"),   "◷")
-        self._nav_item(lay, "recap",     "Recap",                 "✦")
-        self._nav_item(lay, "settings",  i18n.t("nav.settings"),  "⚙")
+        self._nav_item(lay, "recap",     i18n.t("nav.recap"),     "✦")
         lay.addStretch()
+
+        # News button — opens pimpmysteam.com/news in external browser
+        self._nav_section(lay, "PIMPMYSTEAM")
+        self._nav_external(lay, "https://pimpmysteam.com/news", i18n.t("nav.news"), "📰")
+
+        div2 = QFrame(); div2.setFrameShape(QFrame.Shape.HLine)
+        div2.setStyleSheet(f"color:{COLORS['border']};"); div2.setFixedHeight(1)
+        lay.addWidget(div2)
+
+        self._nav_item(lay, "settings",  i18n.t("nav.settings"),  "⚙")
 
         # Add to sidebar layout
         self._sidebar.layout().addWidget(inner)
@@ -162,7 +193,8 @@ class AppWindow(QMainWindow):
         btn.setFont(QFont("Space Mono", 13))
         btn.setCheckable(True)
         btn.setStyleSheet(self._nav_style(False))
-        btn.clicked.connect(lambda _, k=view_key: self._show_view(k))
+        btn.clicked.connect(lambda _, k=view_key: (
+            nav_click_feedback(btn), self._show_view(k)))
 
         w = QWidget(); w.setStyleSheet("background:transparent;")
         wl = QHBoxLayout(w)
@@ -170,6 +202,33 @@ class AppWindow(QMainWindow):
         wl.addWidget(btn)
         lay.addWidget(w)
         self._nav_buttons[view_key] = btn
+
+    def _nav_external(self, lay, url: str, label: str, icon: str):
+        """Nav button that opens an external URL in the system browser."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        btn = QPushButton(f"  {icon}  {label}  ↗")
+        btn.setFixedHeight(38)
+        btn.setFont(QFont("Space Mono", 13))
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background:transparent; color:{COLORS['text_dim']};
+                border:none; border-radius:6px;
+                text-align:left; padding-left:8px;
+                font-family:'Space Mono'; font-size:13px;
+            }}
+            QPushButton:hover {{
+                background:{COLORS['card_hover']}; color:{COLORS['blue']};
+            }}
+        """)
+        btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
+
+        w = QWidget(); w.setStyleSheet("background:transparent;")
+        wl = QHBoxLayout(w)
+        wl.setContentsMargins(8, 1, 8, 1)
+        wl.addWidget(btn)
+        lay.addWidget(w)
 
     def _nav_style(self, active: bool) -> str:
         bg = COLORS["card_hover"] if active else "transparent"
@@ -196,9 +255,11 @@ class AppWindow(QMainWindow):
     def _start(self):
         self._set_active_nav("wishlist")
         view = self._build_view("wishlist")
+        view.setGeometry(self._container.rect())
         view.show()
         if hasattr(view, "refresh"):
             view.refresh()
+        self._initialized_views.add("wishlist")
 
     def _build_view(self, key: str):
         if key in self._views:
@@ -213,9 +274,15 @@ class AppWindow(QMainWindow):
             "wishlist":  lambda: WishlistView(self._container,
                              on_add_game=self._open_add_dialog,
                              on_game_click=self._open_detail),
+            "library":   lambda: __import__("ui.library_view",
+                             fromlist=["LibraryView"]).LibraryView(self._container),
             "dashboard": lambda: DashboardView(self._container),
             "deals":     lambda: DealsView(self._container,
                              on_game_click=self._open_detail),
+            "non_steam": lambda: __import__(
+                             "ui.nonstema_festivals_view",
+                             fromlist=["NonSteamFestivalsView"]
+                             ).NonSteamFestivalsView(self._container),
             "history":   lambda: HistoryView(self._container,
                              on_game_click=self._open_detail),
             "recap":     lambda: __import__("ui.recap_view",
@@ -224,26 +291,52 @@ class AppWindow(QMainWindow):
                              on_locale_change=self._on_locale_change),
         }
         view = builders[key]()
+        # Parent the view to the container without a layout — positions are
+        # managed manually so slide_transition can animate freely.
+        view.setParent(self._container)
+        view.setGeometry(self._container.rect())
         view.hide()
-        self._container_lay.addWidget(view)
         self._views[key] = view
         return view
 
     # ── Navigation ────────────────────────────────────────────────────────────
 
+    def _mark_dirty(self, *keys: str) -> None:
+        """Mark views as needing a refresh next time they are shown."""
+        for k in keys:
+            self._dirty_views.add(k)
+
+    def _refresh_view_if_needed(self, key: str, view) -> None:
+        """Refresh a view only if it's new or its data changed."""
+        if key not in self._initialized_views or key in self._dirty_views:
+            if hasattr(view, "refresh"):
+                try:
+                    view.refresh()
+                except Exception:
+                    pass
+            self._initialized_views.add(key)
+            self._dirty_views.discard(key)
+
     def _show_view(self, key: str):
         if key == self._active_view:
             return
-        current = self._views.get(self._active_view)
-        if current:
-            current.hide()
+        prev_key = self._active_view
+        current  = self._views.get(prev_key)
+
+        view = self._build_view(key)
+
+        # Refresh BEFORE animation — data must be ready when view becomes visible.
+        # Refresh only runs when the view is new or has been marked dirty.
+        self._refresh_view_if_needed(key, view)
+
         self._active_view = key
         self._set_active_nav(key)
         self._close_detail()
-        view = self._build_view(key)
-        view.show()
-        if hasattr(view, "refresh"):
-            view.refresh()
+
+        # Pure animation — no data logic inside
+        safe_show_view(current, view,
+                       from_key=prev_key, to_key=key,
+                       duration=260)
 
     # ── Detail panel ──────────────────────────────────────────────────────────
 
@@ -256,37 +349,53 @@ class AppWindow(QMainWindow):
                 on_refresh=self._refresh_active,
             )
             self._detail_container_lay.addWidget(self._detail_panel)
-        if not self._detail_open:
-            self._detail_container.show()
-            self._detail_open = True
         self._detail_panel.load_game(game)
+        if not self._detail_open:
+            self._detail_open = True
+            slide_in_right(self._detail_container, DETAIL_WIDTH, duration=220)
 
     def _close_detail(self):
         if self._detail_open:
-            self._detail_container.hide()
             self._detail_open = False
+            slide_out_right(self._detail_container, duration=180)
 
     def _refresh_active(self):
+        """Refresh the currently visible view immediately (forced)."""
         view = self._views.get(self._active_view)
-        if view and hasattr(view, "refresh"):
-            view.refresh()
+        if not view:
+            return
+        try:
+            if hasattr(view, "reload_after_change"):
+                view.reload_after_change()
+            elif hasattr(view, "refresh"):
+                view.refresh(force=True)
+        except Exception:
+            pass
 
     def _open_add_dialog(self):
         from ui.add_game_dialog import AddGameDialog
-        dlg = AddGameDialog(self, on_success=self._refresh_active)
+        def _on_add_success():
+            print("Game added — forcing wishlist reload")
+            # Immediately refresh the active view (wishlist), bypassing the
+            # "did anything change" check so the new game appears right away.
+            self._refresh_active()
+            # Mark all views that depend on game data as dirty
+            self._mark_dirty("dashboard", "deals", "recap", "library", "history")
+        dlg = AddGameDialog(self, on_success=_on_add_success)
         dlg.exec()
 
     # ── Locale / Country change ───────────────────────────────────────────────
 
     def _on_locale_change(self):
         """Called after settings saves. Rebuilds everything with new locale/currency."""
-        # 1. Destroy all cached views
+        # 1. Destroy all cached views and reset dirty-flag tracking
         for view in self._views.values():
             view.hide()
-            self._container_lay.removeWidget(view)
             view.setParent(None)
             view.deleteLater()
         self._views.clear()
+        self._initialized_views.clear()
+        self._dirty_views.clear()
 
         # 2. Close detail panel
         self._close_detail()

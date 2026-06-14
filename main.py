@@ -68,12 +68,35 @@ def main():
 
     # Force transparent label backgrounds app-wide — Qt inherits bg from parent otherwise
     app.setStyleSheet("""
-        QLabel { background-color: transparent; }
-        QToolTip { background-color: #141418; color: #f4f4f5; border: 1px solid #27272a; }
+        QLabel          { background-color: transparent; border: none; }
+        QWidget         { background-color: transparent; }
+        QFrame          { border: none; background-color: transparent; }
+        QScrollArea     { border: none; }
+        QPushButton     { border: none; }
+        QToolTip        { background-color: #141418; color: #f4f4f5; border: 1px solid #27272a; }
+    """)
+
+    app.setStyleSheet("""
+        QLabel      { background-color: transparent; border: none; }
+        QFrame      { border: none; }
+        QScrollArea { border: none; }
+        QWidget     { background-color: transparent; }
+        QMainWindow > QWidget { background-color: #09090b; }
+        QToolTip    { background-color: #141418; color: #f4f4f5; border: 1px solid #27272a; }
     """)
 
     window = AppWindow()
     window.show()
+
+    # Refresh sale images AFTER Qt is running — re-renders DealsView when done
+    def _on_images_ready():
+        from PySide6.QtCore import QTimer
+        view = window._views.get("deals")
+        if view and hasattr(view, "refresh"):
+            QTimer.singleShot(0, view.refresh)
+
+    from services.sale_images import refresh_all as _refresh_sales
+    _refresh_sales(on_done=_on_images_ready)
 
     app.aboutToQuit.connect(_auto_sync_drive_exit)
     sys.exit(app.exec())

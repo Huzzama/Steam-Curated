@@ -82,6 +82,7 @@ def _to_game(d: dict) -> Game:
         notes=d.get("notes", ""),
         cover_path=d.get("cover_path"),
         date_added=d.get("date_added", ""),
+        play_status=d.get("play_status", ""),
     )
 
 

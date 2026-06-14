@@ -1,4 +1,3 @@
-"""AddGameDialog — PySide6."""
 import threading
 from typing import Callable
 
@@ -16,6 +15,7 @@ import services.steam_api as steam
 import services.steamgriddb as sgdb
 import services.steamdb_scraper as steamdb
 import i18n
+from ui.animations import pulse_button, shake_widget
 from ui.settings_loader import get_settings
 
 MAX_RESULTS = 5
@@ -26,7 +26,7 @@ def _lbl(text, size=10, bold=False, color=None):
     f = QFont("Space Mono", size)
     if bold: f.setBold(True)
     l.setFont(f)
-    l.setStyleSheet(f"color:{color or COLORS['text']}; background-color:transparent;")
+    l.setStyleSheet(f"color:{color or COLORS['text']};")
     return l
 
 
@@ -99,8 +99,9 @@ class AddGameDialog(QDialog):
 
         # Results box
         results_box = QFrame()
+        results_box.setObjectName("F1addgamed")
         results_box.setStyleSheet(f"""
-            QFrame {{ background:{COLORS['card']};
+            QFrame#F1addgamed {{ background:{COLORS['card']};
                 border:1px solid {COLORS['border']}; border-radius:8px; }}
         """)
         rb_lay = QVBoxLayout(results_box)
@@ -116,7 +117,7 @@ class AddGameDialog(QDialog):
 
             row_w = QWidget()
             row_w.setFixedHeight(30)
-            row_w.setStyleSheet("background:transparent;")
+            row_w.setAutoFillBackground(False)
             row_w.setCursor(Qt.CursorShape.PointingHandCursor)
             rl = QHBoxLayout(row_w)
             rl.setContentsMargins(8, 0, 8, 0)
@@ -139,7 +140,7 @@ class AddGameDialog(QDialog):
             def _enter(e, rw=row_w, rd=row_data):
                 if rd["data"]: rw.setStyleSheet(f"background:{COLORS['card_hover']};")
             def _leave(e, rw=row_w, rd=row_data):
-                if rd["data"]: rw.setStyleSheet("background:transparent;")
+                if rd["data"]: rw.setAutoFillBackground(False)
             row_w.enterEvent = _enter
             row_w.leaveEvent = _leave
 
@@ -153,8 +154,9 @@ class AddGameDialog(QDialog):
 
         # Preview grid
         prev = QFrame()
+        prev.setObjectName("F2addgamed")
         prev.setStyleSheet(f"""
-            QFrame {{ background:{COLORS['card']};
+            QFrame#F2addgamed {{ background:{COLORS['card']};
                 border:1px solid {COLORS['border']}; border-radius:8px; }}
         """)
         pg = QGridLayout(prev)
@@ -256,7 +258,7 @@ class AddGameDialog(QDialog):
 
     def _set_status(self, text: str, color: str):
         self._status_lbl.setText(text)
-        self._status_lbl.setStyleSheet(f"color:{color}; background:transparent;")
+        self._status_lbl.setStyleSheet(f"color:{color};")
 
     def _select_row(self, rd: dict):
         if not rd["data"]: return
@@ -280,23 +282,23 @@ class AddGameDialog(QDialog):
                 r = results[i]
                 rd["data"] = r
                 rd["id_lbl"].setText(f"#{r['id']}")
-                rd["id_lbl"].setStyleSheet(f"color:{COLORS['text_dim']}; background:transparent;")
+                rd["id_lbl"].setStyleSheet(f"color:{COLORS['text_dim']};")
                 rd["name_lbl"].setText(r["name"])
-                rd["name_lbl"].setStyleSheet(f"color:{COLORS['text']}; background:transparent;")
+                rd["name_lbl"].setStyleSheet(f"color:{COLORS['text']};")
                 price = r.get("price", 0)
                 if price is not None:
                     pt = (f"${price:,.0f}" if price > 0
                           else i18n.t("add_game.free"))
                     col = COLORS["green"] if price > 0 else COLORS["blue"]
                     rd["price_lbl"].setText(pt)
-                    rd["price_lbl"].setStyleSheet(f"color:{col}; background:transparent;")
+                    rd["price_lbl"].setStyleSheet(f"color:{col};")
                 else:
                     rd["price_lbl"].setText("")
             else:
                 rd["data"] = None
                 rd["id_lbl"].setText("")
                 rd["name_lbl"].setText("")
-                rd["name_lbl"].setStyleSheet(f"color:{COLORS['text_dim']}; background:transparent;")
+                rd["name_lbl"].setStyleSheet(f"color:{COLORS['text_dim']};")
                 rd["price_lbl"].setText("")
 
     def _search(self):
@@ -325,6 +327,8 @@ class AddGameDialog(QDialog):
         if not results:
             self._sig.status_update.emit(
                 i18n.t("add_game.error_not_found"), COLORS["red"])
+            if hasattr(self, "_search_entry"):
+                shake_widget(self._search_entry)
             return
         self._populate_rows(results)
         self._sig.status_update.emit(
@@ -376,6 +380,7 @@ class AddGameDialog(QDialog):
                 f"color:{COLORS['blue']}; background:transparent;")
         self._sig.status_update.emit(i18n.t("add_game.data_ok"), COLORS["green"])
         self._save_btn.setEnabled(True)
+        pulse_button(self._save_btn, color=COLORS["green"])
 
     def _set_priority(self, p: str):
         self._priority = p

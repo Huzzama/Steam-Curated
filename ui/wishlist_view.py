@@ -1,7 +1,3 @@
-"""
-WishlistView — PySide6.
-Native scroll, GPU rendering, card pool reuse.
-"""
 from __future__ import annotations
 import threading
 from typing import Callable, Optional
@@ -15,6 +11,7 @@ from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSize
 from PySide6.QtGui import QPixmap, QColor, QPainter, QFont
 
 import i18n
+from ui.library_view import translate_genre
 import data.repository as repo
 from data.models import Game
 from config import COLORS, PRIORITY_COLORS, PRIORITY_OPTIONS
@@ -68,7 +65,8 @@ class _GameCard(QFrame):
         # Cover image
         self._img_lbl = QLabel()
         self._img_lbl.setFixedSize(CARD_W - 4, IMG_H)
-        self._img_lbl.setStyleSheet(f"background:{COLORS['card_hover']}; border-radius:6px;")
+        self._img_lbl.setObjectName("CardImg")
+        self._img_lbl.setStyleSheet(f"QLabel#CardImg {{ background:{COLORS['card_hover']}; border-radius:6px; }}")
         self._img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self._img_lbl)
 
@@ -78,37 +76,42 @@ class _GameCard(QFrame):
         self._badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._badge.setFont(QFont("Space Mono", 10, QFont.Weight.Bold))
         self._badge.move(CARD_W - 4 - 28, 4)
-        self._badge.setStyleSheet("border-radius:4px; color:#000; background-color:transparent;")
+        self._badge.setAutoFillBackground(False)
+        self._badge.setStyleSheet("border-radius:4px; color:#000;")
         self._badge.hide()
 
         # Info
         info = QWidget()
-        info.setStyleSheet("background:transparent;")
+        info.setAutoFillBackground(False)
         info_lay = QVBoxLayout(info)
         info_lay.setContentsMargins(6, 4, 6, 0)
         info_lay.setSpacing(1)
 
         self._name_lbl = QLabel()
         self._name_lbl.setFont(QFont("Space Mono", 9, QFont.Weight.Bold))
-        self._name_lbl.setStyleSheet(f"color:{COLORS['text']};")
+        self._name_lbl.setStyleSheet(f"color:{COLORS['text']}; background-color:transparent;")
+        self._name_lbl.setAutoFillBackground(False)
         self._name_lbl.setWordWrap(True)
         self._name_lbl.setMaximumWidth(CARD_W - 12)
         info_lay.addWidget(self._name_lbl)
 
         self._meta_lbl = QLabel()
         self._meta_lbl.setFont(QFont("Space Mono", 8))
-        self._meta_lbl.setStyleSheet(f"color:{COLORS['text_dim']};")
+        self._meta_lbl.setStyleSheet(f"color:{COLORS['text_dim']}; background-color:transparent;")
+        self._meta_lbl.setAutoFillBackground(False)
         info_lay.addWidget(self._meta_lbl)
 
         pr_row = QHBoxLayout()
         pr_row.setSpacing(4)
         self._price_lbl = QLabel()
         self._price_lbl.setFont(QFont("Space Mono", 9, QFont.Weight.Bold))
-        self._price_lbl.setStyleSheet(f"color:{COLORS['text']};")
+        self._price_lbl.setStyleSheet(f"color:{COLORS['text']}; background-color:transparent;")
+        self._price_lbl.setAutoFillBackground(False)
         pr_row.addWidget(self._price_lbl)
 
         self._dot_lbl = QLabel()
         self._dot_lbl.setFont(QFont("Space Mono", 9, QFont.Weight.Bold))
+        self._dot_lbl.setAutoFillBackground(False)
         pr_row.addStretch()
         pr_row.addWidget(self._dot_lbl)
         info_lay.addLayout(pr_row)
@@ -140,29 +143,29 @@ class _GameCard(QFrame):
         self._name_lbl.setText(game.name or "")
 
         # Meta
-        meta = (f"{game.release_year or '—'} · "
-                f"{game.genre.split(',')[0] if game.genre else '—'}")
+        _genre = translate_genre(game.genre.split(',')[0].strip()) if game.genre else '—'
+        meta = f"{game.release_year or '—'} · {_genre}"
         self._meta_lbl.setText(meta)
 
         # Price
         if game.price:
             col = COLORS["green"] if game.price.is_on_sale else COLORS["text"]
             self._price_lbl.setText(f"${game.price.current:,.0f}")
-            self._price_lbl.setStyleSheet(f"color:{col};")
+            self._price_lbl.setStyleSheet(f"color:{col}; background-color:transparent;")
         else:
             self._price_lbl.setText("—")
-            self._price_lbl.setStyleSheet(f"color:{COLORS['text_dim']};")
+            self._price_lbl.setStyleSheet(f"color:{COLORS['text_dim']}; background-color:transparent;")
 
         # Rec dot
         rec = game.buy_recommendation
-        if any(x in rec for x in ("Buy now", "Comprar ahora")):
+        if any(x in rec for x in (i18n.t("recommendation.buy_now"), i18n.t("recommendation.near_low"))):
             dot, dot_c = "✓", COLORS["green"]
-        elif any(x in rec for x in ("Close", "cercano")):
+        elif i18n.t("recommendation.near_low") in rec:
             dot, dot_c = "≈", COLORS["gold"]
         else:
             dot, dot_c = "↓", COLORS["text_dim"]
         self._dot_lbl.setText(dot)
-        self._dot_lbl.setStyleSheet(f"color:{dot_c};")
+        self._dot_lbl.setStyleSheet(f"color:{dot_c}; background-color:transparent;")
 
         self.show()
 
@@ -199,6 +202,7 @@ class WishlistView(QFrame):
         self._search_text             = ""
         self._last_rendered_ids: list = []
         self._pool: dict[str, list]   = {}
+        self._row_widgets: list[QWidget] = []
         self._filter_timer            = QTimer()
         self._filter_timer.setSingleShot(True)
         self._filter_timer.setInterval(150)
@@ -228,7 +232,7 @@ class WishlistView(QFrame):
 
         title = QLabel(i18n.t("nav.wishlist"))
         title.setFont(QFont("Space Mono", 14, QFont.Weight.Bold))
-        title.setStyleSheet(f"color:{COLORS['text']};")
+        title.setStyleSheet(f"color:{COLORS['text']}; background-color:transparent;")
         tb.addWidget(title)
 
         self._search = QLineEdit()
@@ -248,7 +252,8 @@ class WishlistView(QFrame):
         self._filter_btns: dict[str, QPushButton] = {}
         for key, lbl in [("all", i18n.t("filters.all")),
                           ("S","S"),("A","A"),("B","B"),("C","C"),
-                          ("sale", i18n.t("filters.on_sale"))]:
+                          ("sale", i18n.t("filters.on_sale")),
+                          ("purchased", i18n.t("filters.purchased"))]:
             btn = QPushButton(lbl)
             btn.setFixedHeight(28)
             btn.setCheckable(True)
@@ -261,10 +266,10 @@ class WishlistView(QFrame):
         tb.addStretch()
 
         self._covers_lbl = QLabel("")
-        self._covers_lbl.setStyleSheet(f"color:{COLORS['text_dim']}; font-size:10px;")
+        self._covers_lbl.setStyleSheet(f"color:{COLORS['text_dim']}; background-color:transparent; font-size:10px;")
         tb.addWidget(self._covers_lbl)
 
-        covers_btn = SteamButton(text="⬇ Covers", command=self._download_covers,
+        covers_btn = SteamButton(text=i18n.t("wishlist.covers_btn"), command=self._download_covers,
                                  style="ghost")
         covers_btn.setFixedHeight(30)
         tb.addWidget(covers_btn)
@@ -332,9 +337,9 @@ class WishlistView(QFrame):
         root.addWidget(self._scroll, 1)
 
         # Empty label
-        self._empty_lbl = QLabel("No games match the filter.")
+        self._empty_lbl = QLabel(i18n.t("wishlist.no_match"))
         self._empty_lbl.setFont(QFont("Space Mono", 13))
-        self._empty_lbl.setStyleSheet(f"color:{COLORS['text_dim']};")
+        self._empty_lbl.setStyleSheet(f"color:{COLORS['text_dim']}; background-color:transparent;")
         self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_lbl.hide()
         self._content_lay.insertWidget(0, self._empty_lbl)
@@ -368,12 +373,30 @@ class WishlistView(QFrame):
 
     def refresh(self, force: bool = False):
         self._games = repo.get_all()
+        print("Wishlist refreshed")
+        print(f"Games loaded: {len(self._games)}")
         self._update_stats()
-        new_ids = [(g.id, g.priority, g.cover_path, 
+        # Include status and len so any add/remove/status-change forces re-render.
+        # status is included so "Purchased" games that change status also update.
+        new_ids = [(g.id, g.priority, g.status, g.cover_path,
                     g.price.current if g.price else 0) for g in self._games]
         if force or new_ids != self._last_rendered_ids:
             self._last_rendered_ids = new_ids
-            self._apply_filter()
+            # Always run _apply_filter on main thread.
+            # If we're already on the main thread this is a direct call;
+            # if called from a background thread the QTimer ensures safety.
+            QTimer.singleShot(0, self._apply_filter)
+
+    def reload_after_change(self):
+        """
+        Call this after any action that adds, removes, or changes a game
+        (Add Game, Import Wishlist, Mark Purchased, Mark Wishlist, Delete
+        Game, Change Priority). Forces a full re-fetch from the repository
+        and an immediate re-render, regardless of whether the cached
+        "rendered ids" snapshot looks unchanged.
+        """
+        self._last_rendered_ids = []
+        self.refresh(force=True)
 
     def _update_stats(self):
         games    = self._games
@@ -407,12 +430,24 @@ class WishlistView(QFrame):
             btn.setStyleSheet(self._filter_btn_style(active))
         self._apply_filter()
 
+    # Statuses that mean "still on the wishlist" — everything else is excluded.
+    # "Purchased" (and its i18n variants) are excluded from the main wishlist grid;
+    # they appear in the Library and Recap views instead.
+    _WISHLIST_STATUSES = {"Wishlist", "Archivado"}
+
     def _apply_filter(self):
-        games = self._games
-        if self._filter == "sale":
-            games = [g for g in games if g.price and g.price.is_on_sale]
-        elif self._filter in ("S","A","B","C"):
-            games = [g for g in games if g.priority == self._filter]
+        if self._filter == "purchased":
+            # Show ONLY purchased games — the inverse of the main wishlist grid.
+            games = [g for g in self._games
+                     if g.status not in self._WISHLIST_STATUSES and g.status]
+        else:
+            # Exclude purchased / non-wishlist games from the main grid.
+            games = [g for g in self._games
+                     if g.status in self._WISHLIST_STATUSES or not g.status]
+            if self._filter == "sale":
+                games = [g for g in games if g.price and g.price.is_on_sale]
+            elif self._filter in ("S","A","B","C"):
+                games = [g for g in games if g.priority == self._filter]
         if self._search_text:
             q = self._search_text
             games = [g for g in games
@@ -427,17 +462,32 @@ class WishlistView(QFrame):
         self._empty_lbl.setVisible(not has_any)
 
         images_to_load: list = []
+
+        # Hide all cards and detach them from their current row widget.
+        # Must happen BEFORE deleting old row widgets below, since the cards
+        # are pooled/reused across layouts — if we deleteLater() a row while
+        # a pooled card is still its child, Qt destroys the card with it.
+        for p_cards in self._pool.values():
+            for card in p_cards:
+                card.hide_card()
+                card.setParent(None)
+
+        # Remove + fully delete row widgets created by the previous _layout()
+        # call. Previously these were left orphaned in _content_lay, causing
+        # stale rows, leftover/duplicate cards, and games that wouldn't
+        # appear/disappear without an app restart.
+        for row in self._row_widgets:
+            self._content_lay.removeWidget(row)
+            row.setParent(None)
+            row.deleteLater()
+        self._row_widgets = []
+
         # Clear old section widgets
         for attr in [f"_sec_{p}" for p in "SABC"]:
             if hasattr(self, attr):
                 w = getattr(self, attr)
                 self._content_lay.removeWidget(w)
                 w.hide()
-
-        # Hide all cards
-        for p_cards in self._pool.values():
-            for card in p_cards:
-                card.hide_card()
 
         insert_pos = 1  # after empty_lbl
 
@@ -453,8 +503,7 @@ class WishlistView(QFrame):
                 lbl.setFont(QFont("Space Mono", 11, QFont.Weight.Bold))
                 color = PRIORITY_COLORS.get(priority, COLORS["text_dim"])
                 lbl.setStyleSheet(
-                    f"color:{color}; padding:8px 0 4px 0;"
-                    f" background:transparent;")
+                    f"color:{color}; padding:8px 0 4px 0; background-color:transparent;")
                 setattr(self, attr, lbl)
             sec_lbl = getattr(self, attr)
             self._content_lay.insertWidget(insert_pos, sec_lbl)
@@ -470,11 +519,13 @@ class WishlistView(QFrame):
                 col = gi % COLS
                 if col == 0:
                     row_w = QWidget()
-                    row_w.setStyleSheet("background:transparent;")
+                    row_w.setAutoFillBackground(False)
                     row_lay = QHBoxLayout(row_w)
                     row_lay.setContentsMargins(0, 0, 0, 4)
                     row_lay.setSpacing(8)
+                    row_lay.setAlignment(Qt.AlignmentFlag.AlignLeft)
                     self._content_lay.insertWidget(insert_pos, row_w)
+                    self._row_widgets.append(row_w)
                     insert_pos += 1
 
                 if pool_i < len(pool):
@@ -486,11 +537,9 @@ class WishlistView(QFrame):
                     if game.cover_path:
                         images_to_load.append((card, game.cover_path))
 
-            # Fill last row
+            # Always add stretch to last row so cards align left
             if row_w and group:
-                last_row_count = len(group) % COLS
-                if last_row_count:
-                    row_w.layout().addStretch()
+                row_w.layout().addStretch(1)
 
         # Load images in background
         if images_to_load:
@@ -527,8 +576,8 @@ class WishlistView(QFrame):
         settings = get_settings()
         missing  = sum(1 for g in self._games if not cover_exists(g.app_id))
         if missing == 0:
-            self._covers_lbl.setText("✓ All done")
-            self._covers_lbl.setStyleSheet(f"color:{COLORS['green']}; font-size:10px;")
+            self._covers_lbl.setText(i18n.t("wishlist.covers_all_done"))
+            self._covers_lbl.setStyleSheet(f"color:{COLORS['green']}; background-color:transparent; font-size:10px;")
             QTimer.singleShot(3000, lambda: self._covers_lbl.setText(""))
             return
         self._covers_btn.setEnabled(False)
@@ -542,7 +591,7 @@ class WishlistView(QFrame):
             def _upd():
                 self._covers_btn.setEnabled(True)
                 self._covers_lbl.setText(
-                    f"✓{dl}" if not fail else f"✓{dl} ✗{fail}")
+                    i18n.t("wishlist.covers_ok").format(dl=dl) if not fail else i18n.t("wishlist.covers_result").format(dl=dl, fail=fail))
                 from ui.image_cache import clear
                 clear()
                 self._last_rendered_ids = []

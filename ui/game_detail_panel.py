@@ -1,7 +1,3 @@
-"""
-GameDetailPanel — PySide6.
-Side panel showing game details, price, recommendation, edit controls.
-"""
 import threading
 import webbrowser
 import subprocess
@@ -19,7 +15,6 @@ from config import COLORS, PRIORITY_OPTIONS, PRIORITY_COLORS
 from data.models import Game
 import data.repository as repo
 import services.steam_api as steam
-import services.steamdb_scraper as steamdb
 import services.steamgriddb as sgdb
 from ui.settings_loader import get_settings
 import i18n
@@ -39,7 +34,8 @@ def open_steam_page(app_id: str, fallback_url: str):
 
 
 class _Sig(QObject):
-    reload = Signal(object)   # Game
+    reload      = Signal(object)        # Game
+    price_data  = Signal(str, object)   # (cc, PriceInfo|None)
 
 
 def _lbl(text, size=10, bold=False, color=None, wrap=0):
@@ -47,7 +43,7 @@ def _lbl(text, size=10, bold=False, color=None, wrap=0):
     f = QFont("Space Mono", size)
     if bold: f.setBold(True)
     l.setFont(f)
-    l.setStyleSheet(f"color:{color or COLORS['text']}; background-color:transparent;")
+    l.setStyleSheet(f"color:{color or COLORS['text']};")
     if wrap: l.setWordWrap(True)
     return l
 
@@ -152,11 +148,13 @@ class GameDetailPanel(QFrame):
     def load_game(self, game: Game):
         self._game = game
         self._title_lbl.setText(game.name)
-        # Clear content
+        # Clear content synchronously — deleteLater is async and causes overlap
         while self._content_lay.count():
             item = self._content_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w:
+                w.hide()
+                w.setParent(None)
         self._render(game)
 
     # ── Render ────────────────────────────────────────────────────────────────
@@ -171,7 +169,7 @@ class GameDetailPanel(QFrame):
         # Cover
         cov_lbl = QLabel()
         cov_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        cov_lbl.setStyleSheet("background:transparent;")
+        cov_lbl.setAutoFillBackground(False)
         if game.cover_path:
             px = QPixmap(game.cover_path)
             if not px.isNull():
@@ -183,7 +181,7 @@ class GameDetailPanel(QFrame):
 
         # Priority badge
         badge_row = QWidget()
-        badge_row.setStyleSheet("background:transparent;")
+        badge_row.setAutoFillBackground(False)
         br = QHBoxLayout(badge_row)
         br.setContentsMargins(P, 8, P, 0)
         br.setSpacing(6)
@@ -227,21 +225,43 @@ class GameDetailPanel(QFrame):
         bought = purchases.get_by_app_id(game.app_id)
         if bought:
             b_frame = QFrame()
+            b_frame.setObjectName("PurchasedBanner")
             b_frame.setStyleSheet(f"""
-                QFrame {{ background:#0a1f0a; border:1px solid #1a4a1a;
-                          border-radius:8px; margin:{4}px {P}px 0 {P}px; }}
+                QFrame#PurchasedBanner {{
+                    background:#0a1f0a; border:1px solid #1a4a1a;
+                    border-radius:8px; margin:{4}px {P}px 0 {P}px;
+                }}
             """)
-            bf = QHBoxLayout(b_frame)
+            bf = QVBoxLayout(b_frame)
             bf.setContentsMargins(12, 8, 12, 8)
-            bf.addWidget(_lbl(f"✓  Purchased {bought.edition} Edition",
-                              11, bold=True, color=COLORS["green"]))
-            bf.addStretch()
-            bf.addWidget(_lbl(
-                f"${bought.price_paid:,.2f} {bought.currency}  ·  {bought.purchased_at}",
-                10, color=COLORS["text_dim"]))
+            bf.setSpacing(2)
+
+            # Top row: checkmark + edition (truncated)
+            top_row = QHBoxLayout()
+            top_row.setSpacing(6)
+            edition_text = bought.edition or i18n.t("detail.standard_edition")
+            if len(edition_text) > 28:
+                edition_text = edition_text[:26] + "…"
+            check_lbl = _lbl(i18n.t("detail.purchased_label").format(edition=edition_text),
+                             11, bold=True, color=COLORS["green"])
+            check_lbl.setAutoFillBackground(False)
+            top_row.addWidget(check_lbl, 1)
+
+            # Price on same line, right-aligned, fixed width
+            price_lbl = _lbl(
+                f"${bought.price_paid:,.2f} {bought.currency}",
+                10, color=COLORS["green"])
+            price_lbl.setAutoFillBackground(False)
+            top_row.addWidget(price_lbl)
+            bf.addLayout(top_row)
+
+            # Date below, smaller
+            date_lbl = _lbl(bought.purchased_at or "", 9, color=COLORS["text_dim"])
+            date_lbl.setAutoFillBackground(False)
+            bf.addWidget(date_lbl)
             add(b_frame)
         else:
-            buy_btn = QPushButton("🛒  I bought this game")
+            buy_btn = QPushButton(i18n.t("detail.i_bought_this"))
             buy_btn.setFixedHeight(34)
             buy_btn.setStyleSheet(f"""
                 QPushButton {{ background:{COLORS['green']}; color:#000;
@@ -269,7 +289,7 @@ class GameDetailPanel(QFrame):
             (i18n.t("game.publisher"),game.publisher or "—"),
         ]:
             row = QWidget()
-            row.setStyleSheet("background:transparent;")
+            row.setAutoFillBackground(False)
             rl = QHBoxLayout(row)
             rl.setContentsMargins(P, 1, P, 1)
             l1 = _lbl(label + ":", 10, color=COLORS["text_dim"])
@@ -292,7 +312,7 @@ class GameDetailPanel(QFrame):
             btn = _ghost_btn(text, cmd, danger)
             btn.setContentsMargins(P, 0, P, 0)
             w = QWidget()
-            w.setStyleSheet("background:transparent;")
+            w.setAutoFillBackground(False)
             wl = QVBoxLayout(w)
             wl.setContentsMargins(P, 2, P, 2)
             wl.addWidget(btn)
@@ -304,7 +324,7 @@ class GameDetailPanel(QFrame):
 
     def _render_price(self, lay, game: Game, P: int):
         frame = QWidget()
-        frame.setStyleSheet("background:transparent;")
+        frame.setAutoFillBackground(False)
         fl = QVBoxLayout(frame)
         fl.setContentsMargins(P, 0, P, 0)
         fl.setSpacing(2)
@@ -369,52 +389,176 @@ class GameDetailPanel(QFrame):
         from ui.settings_loader import get_settings
         settings = get_settings()
 
-        # Get user's base region and compare regions
-        base_cc      = settings.get("country", "mx")
-        compare_ccs  = settings.get("compare_regions",
-                                    ["us", "ar", "br"])
-        # Always show base first, then compare regions (no duplicates)
-        all_regions  = [base_cc] + [r for r in compare_ccs if r != base_cc]
+        base_cc     = settings.get("country", "mx")
+        compare_ccs = settings.get("compare_regions", ["us", "ar", "br"])
+        all_regions = [base_cc] + [r for r in compare_ccs if r != base_cc]
 
-        # Region display names from i18n
         def region_name(cc): return i18n.t(f"regions.{cc}")
 
         frame = QWidget()
-        frame.setStyleSheet("background:transparent;")
+        frame.setAutoFillBackground(False)
         fl = QVBoxLayout(frame)
         fl.setContentsMargins(P, 0, P, 0)
         fl.setSpacing(4)
         fl.addWidget(_lbl(i18n.t("detail.price_by_region"), 11, bold=True))
 
-        self._compare_labels: dict[str, tuple] = {}  # cc -> (price_lbl, diff_lbl)
+        # Build rows — keep refs in a local dict tied to this frame
+        row_labels: dict[str, tuple] = {}
         for cc in all_regions:
-            row = QWidget(); row.setStyleSheet("background:transparent;")
+            row = QWidget(); row.setAutoFillBackground(False)
             rl  = QHBoxLayout(row)
             rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(8)
 
-            # Flag + region name
             name_lbl = _lbl(region_name(cc), 10, color=COLORS["text_dim"])
             name_lbl.setFixedWidth(120)
             rl.addWidget(name_lbl)
 
-            # Price (loading…)
             price_lbl = _lbl("…", 11, bold=True)
             rl.addWidget(price_lbl)
 
-            # % diff vs base (only for non-base regions)
             diff_lbl = _lbl("", 10)
             if cc == base_cc:
-                diff_lbl.setText("← base")
-                diff_lbl.setStyleSheet(f"color:{COLORS['blue']}; background:transparent;")
+                diff_lbl.setText(i18n.t("detail.base_ref"))
+                diff_lbl.setStyleSheet(f"color:{COLORS['blue']};")
             rl.addWidget(diff_lbl)
             rl.addStretch()
 
-            self._compare_labels[cc] = (price_lbl, diff_lbl)
+            row_labels[cc] = (price_lbl, diff_lbl)
             fl.addWidget(row)
 
         lay.addWidget(frame)
 
-        # Fetch all regions in background
+        if not game.app_id:
+            for cc in all_regions:
+                pl, _ = row_labels.get(cc, (None, None))
+                if pl:
+                    pl.setText(i18n.t("detail.not_available"))
+                    pl.setStyleSheet(f"color:{COLORS['text_dim']};")
+            return
+
+        # Use price_data signal to deliver the full prices dict at once.
+        # Disconnect stale slot from any previous game panel.
+        try:
+            self._sig.price_data.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+
+        def _on_prices_ready(cc_unused: str, prices_obj):
+            """Receives the full {cc: PriceInfo|None} dict via the signal."""
+            prices: dict = prices_obj  # we'll abuse the second arg as payload
+
+            # ── Build a USD equivalent for every region ──────────────────────
+            # Steam's cc=us always returns USD, so use it as the common unit.
+            # For each region we fetch their price in USD using the store's own
+            # regional pricing (cc=us gives the US price; others are Steam's
+            # regional equivalents already expressed in their local currency).
+            # We compare via the ratio: local_usd_equiv / base_usd_equiv.
+            #
+            # To get a USD equivalent without a currency API we ask Steam for
+            # each region's price with cc=us (which is the US price), but
+            # that gives the same number for all — not useful.
+            # Instead we use the ratio of (current / base_price_usd_ref):
+            #   base_usd_ref  = price fetched with cc=us for the same game
+            #   other_usd_ref = price fetched with cc=us for the same game too
+            # That's identical, so we need actual exchange-rate normalization.
+            #
+            # Simplest correct approach: Steam's storefront for Argentina (ar)
+            # returns prices in USD already. For others we use a hardcoded
+            # rough table — good enough for a "cheap vs expensive" signal.
+            USD_RATES = {
+                "USD": 1.0,
+                "MXN": 0.050,   # 1 MXN ≈ 0.050 USD
+                "BRL": 0.18,    # 1 BRL ≈ 0.18 USD
+                "JPY": 0.0065,  # 1 JPY ≈ 0.0065 USD
+                "EUR": 1.08,
+                "GBP": 1.27,
+                "CAD": 0.73,
+                "AUD": 0.64,
+                "RUB": 0.011,
+                "TRY": 0.028,
+                "KRW": 0.00073,
+                "CNY": 0.138,
+                "PLN": 0.25,
+                "CZK": 0.044,
+                "HUF": 0.0027,
+                "NOK": 0.094,
+                "SEK": 0.095,
+                "DKK": 0.145,
+                "CHF": 1.12,
+                "NZD": 0.60,
+                "SGD": 0.74,
+                "HKD": 0.128,
+                "TWD": 0.031,
+                "THB": 0.028,
+                "INR": 0.012,
+                "CLP": 0.00105,
+                "COP": 0.00024,
+                "PEN": 0.27,
+                "ARS": 0.00095,
+                "UAH": 0.024,
+            }
+
+            def to_usd(p) -> float | None:
+                if not p:
+                    return None
+                rate = USD_RATES.get(p.currency)
+                if rate is None:
+                    return None
+                return p.current * rate
+
+            base_p   = prices.get(base_cc)
+            base_usd = to_usd(base_p)
+
+            for cc in all_regions:
+                p  = prices.get(cc)
+                pl, dl = row_labels.get(cc, (None, None))
+                if not pl:
+                    continue
+
+                # Price label
+                if p:
+                    txt = f"{p.current:,.0f} {p.currency}"
+                    col = COLORS["green"] if p.is_on_sale else COLORS["text"]
+                else:
+                    txt = i18n.t("detail.not_available")
+                    col = COLORS["text_dim"]
+                pl.setText(txt)
+                pl.setStyleSheet(f"color:{col};")
+
+                # Diff label
+                if not dl:
+                    continue
+                if cc == base_cc:
+                    diff_txt = i18n.t("detail.base_ref")
+                    diff_col = COLORS["blue"]
+                elif p and base_usd and base_usd > 0:
+                    other_usd = to_usd(p)
+                    if other_usd is not None:
+                        pct = ((other_usd - base_usd) / base_usd) * 100
+                        if pct < -1:
+                            diff_txt = f"{pct:+.0f}%"
+                            diff_col = COLORS["green"]   # cheaper → green
+                        elif pct > 1:
+                            diff_txt = f"{pct:+.0f}%"
+                            diff_col = COLORS["red"]     # pricier → red
+                        else:
+                            diff_txt = i18n.t("detail.approx_equal")
+                            diff_col = COLORS["text_dim"]
+                    else:
+                        diff_txt = ""
+                        diff_col = COLORS["text_dim"]
+                elif p:
+                    diff_txt = ""
+                    diff_col = COLORS["text_dim"]
+                else:
+                    diff_txt = ""
+                    diff_col = COLORS["text_dim"]
+
+                dl.setText(diff_txt)
+                dl.setStyleSheet(f"color:{diff_col};")
+
+        self._sig.price_data.connect(_on_prices_ready)
+
         import threading as _t
         import services.steam_api as _steam
 
@@ -422,52 +566,12 @@ class GameDetailPanel(QFrame):
             prices: dict = {}
             for cc in all_regions:
                 try:
-                    p = _steam.refresh_price(game.app_id, country=cc)
-                    prices[cc] = p
-                except Exception:
+                    prices[cc] = _steam.refresh_price(str(game.app_id), country=cc)
+                except Exception as e:
+                    print(f"[PriceCompare] {cc} exception: {e}")
                     prices[cc] = None
-
-            # Update labels on main thread
-            base_price = prices.get(base_cc)
-            base_val   = base_price.current if base_price else None
-
-            for cc in all_regions:
-                p = prices.get(cc)
-                pl, dl = self._compare_labels.get(cc, (None, None))
-                if not pl: continue
-
-                if p:
-                    txt = f"{p.current:,.0f} {p.currency}"
-                    if p.is_on_sale:
-                        txt += f"  -{p.discount_pct}%"
-                    col = COLORS["green"] if p.is_on_sale else COLORS["text"]
-                else:
-                    txt = "N/A"; col = COLORS["text_dim"]
-
-                # Calculate % diff vs base for non-base regions
-                diff_txt = "← base" if cc == base_cc else ""
-                diff_col = COLORS["blue"]
-                if cc != base_cc and base_val and p and p.current:
-                    # We can't compare directly (different currencies)
-                    # Show relative to base price % discount from MSRP instead
-                    base_disc = base_price.discount_pct if base_price else 0
-                    this_disc = p.discount_pct
-                    diff = this_disc - base_disc
-                    if diff > 0:
-                        diff_txt = f"+{diff}% cheaper"
-                        diff_col = COLORS["green"]
-                    elif diff < 0:
-                        diff_txt = f"{diff}% pricier"
-                        diff_col = COLORS["red"]
-                    else:
-                        diff_txt = "same deal"
-                        diff_col = COLORS["text_dim"]
-
-                QTimer.singleShot(0, lambda l=pl, t=txt, c=col: (
-                    l.setText(t), l.setStyleSheet(f"color:{c}; background:transparent;")))
-                if dl:
-                    QTimer.singleShot(0, lambda l=dl, t=diff_txt, c=diff_col: (
-                        l.setText(t), l.setStyleSheet(f"color:{c}; background:transparent;")))
+            # Emit once with all data; reuse signal with prices dict as payload
+            self._sig.price_data.emit("__done__", prices)
 
         _t.Thread(target=_fetch, daemon=True).start()
 
@@ -487,8 +591,9 @@ class GameDetailPanel(QFrame):
         icon     = icons.get(rec["verdict"], "—")
 
         card = QFrame()
+        card.setObjectName("F1gamedeta")
         card.setStyleSheet(f"""
-            QFrame {{
+            QFrame#F1gamedeta {{
                 background:{COLORS['card']};
                 border:1px solid {COLORS['border']};
                 border-left:3px solid {accent};
@@ -512,8 +617,9 @@ class GameDetailPanel(QFrame):
 
         if rec.get("next_sale"):
             sale_box = QFrame()
+            sale_box.setObjectName("F2gamedeta")
             sale_box.setStyleSheet(f"""
-                QFrame {{ background:{COLORS['bg']};
+                QFrame#F2gamedeta {{ background:{COLORS['bg']};
                     border:1px solid {COLORS['border']}; border-radius:6px; }}
             """)
             sb = QVBoxLayout(sale_box)
@@ -528,7 +634,7 @@ class GameDetailPanel(QFrame):
 
     def _render_edit(self, lay, game: Game, P: int):
         w = QWidget()
-        w.setStyleSheet("background:transparent;")
+        w.setAutoFillBackground(False)
         wl = QVBoxLayout(w)
         wl.setContentsMargins(P, 0, P, 0)
         wl.setSpacing(4)
@@ -615,13 +721,12 @@ class GameDetailPanel(QFrame):
     def _refresh_prices(self, game: Game):
         def _work():
             settings = get_settings()
-            data = steam.get_app_details(
-                game.app_id, country=settings.get("country", "mx"))
+            country  = settings.get("country", "mx")
+            # Bust the cache so we get fresh data
+            steam._app_details_cache.pop(f"{game.app_id}:{country}", None)
+            data = steam.get_app_details(game.app_id, country=country)
             if data:
                 game.price = steam.parse_price(data)
-            history = steamdb.get_price_history(game.app_id)
-            if history:
-                game.price_history = history
             repo.update(game)
             self._sig.reload.emit(game)
             QTimer.singleShot(0, self.on_refresh)

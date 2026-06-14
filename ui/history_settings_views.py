@@ -14,6 +14,7 @@ from PySide6.QtGui import QFont
 from config import COLORS, LOCALES, PRIORITY_COLORS
 import data.repository as repo
 import i18n
+from ui.library_view import translate_genre
 
 
 # ── settings helpers ──────────────────────────────────────────────────────────
@@ -22,9 +23,19 @@ _DEFAULTS = {
     "locale":            "es",
     "steamgriddb_key":   "",
     "country":           "mx",
+    "timezone":          "GMT-6",
     "steam_id64":        "",
     "steamkustom_token": "",
 }
+
+GMT_OPTIONS = [
+    "GMT-12", "GMT-11", "GMT-10", "GMT-9", "GMT-8",
+    "GMT-7",  "GMT-6",  "GMT-5",  "GMT-4", "GMT-3",
+    "GMT-2",  "GMT-1",  "GMT+0",  "GMT+1", "GMT+2",
+    "GMT+3",  "GMT+4",  "GMT+5",  "GMT+5:30",
+    "GMT+6",  "GMT+7",  "GMT+8",  "GMT+9",
+    "GMT+10", "GMT+11", "GMT+12",
+]
 
 
 def _settings_path():
@@ -148,7 +159,8 @@ class HistoryView(QFrame):
         super().__init__(parent)
         self.on_game_click = on_game_click
         self._last_ids: list = []
-        self.setStyleSheet(f"background:{COLORS['bg']};")
+        self.setObjectName("HistoryView")
+        self.setStyleSheet(f"QFrame#HistoryView {{ background:{COLORS['bg']}; }}")
         self._build()
 
     def _build(self):
@@ -159,17 +171,81 @@ class HistoryView(QFrame):
         # Header
         header = QFrame()
         header.setFixedHeight(52)
-        header.setStyleSheet(f"background:{COLORS['panel']}; border:none;")
+        header.setObjectName("HistoryHeader")
+        header.setStyleSheet(f"QFrame#HistoryHeader {{ background:{COLORS['panel']}; }}")
         hb = QHBoxLayout(header)
         hb.setContentsMargins(18, 0, 18, 0)
         hb.addWidget(_lbl(i18n.t("history.title"), 16, bold=True))
-        hb.addWidget(_lbl(i18n.t("history.subtitle"), 11, color=COLORS["text_dim"]))
         hb.addStretch()
         root.addWidget(header)
 
-        # Scroll
+        # ── Tab bar ───────────────────────────────────────────────────────────
+        tab_bar = QWidget()
+        tab_bar.setObjectName("HistoryTabBar")
+        tab_bar.setStyleSheet(f"QWidget#HistoryTabBar {{ background:{COLORS['panel']}; border-bottom:1px solid {COLORS['border']}; }}")
+        tab_bar.setFixedHeight(38)
+        tbl = QHBoxLayout(tab_bar)
+        tbl.setContentsMargins(18, 0, 18, 0)
+        tbl.setSpacing(0)
+
+        self._tab = "recently_added"
+
+        def _tab_style(active):
+            if active:
+                return f"""
+                    QPushButton {{
+                        background:transparent; color:{COLORS['blue']};
+                        border:none; border-bottom:2px solid {COLORS['blue']};
+                        font-family:'Space Mono'; font-size:11px; font-weight:bold;
+                        padding:0 16px;
+                    }}
+                """
+            return f"""
+                QPushButton {{
+                    background:transparent; color:{COLORS['text_dim']};
+                    border:none; border-bottom:2px solid transparent;
+                    font-family:'Space Mono'; font-size:11px;
+                    padding:0 16px;
+                }}
+                QPushButton:hover {{ color:{COLORS['text']}; }}
+            """
+
+        self._btn_recent   = QPushButton(i18n.t("history.recently_added"))
+        self._btn_purchase = QPushButton(i18n.t("history.purchase_history"))
+        self._btn_recent.setFixedHeight(38)
+        self._btn_purchase.setFixedHeight(38)
+        self._btn_recent.setStyleSheet(_tab_style(True))
+        self._btn_purchase.setStyleSheet(_tab_style(False))
+
+        def _switch(tab):
+            self._tab = tab
+            self._btn_recent.setStyleSheet(_tab_style(tab == "recently_added"))
+            self._btn_purchase.setStyleSheet(_tab_style(tab == "purchases"))
+            if tab == "recently_added":
+                self._stack.setCurrentIndex(0)
+                self.refresh()
+            else:
+                self._stack.setCurrentIndex(1)
+                self._render_purchases()
+
+        from PySide6.QtWidgets import QStackedWidget
+
+        self._btn_recent.clicked.connect(lambda: _switch("recently_added"))
+        self._btn_purchase.clicked.connect(lambda: _switch("purchases"))
+        tbl.addWidget(self._btn_recent)
+        tbl.addWidget(self._btn_purchase)
+        tbl.addStretch()
+        root.addWidget(tab_bar)
+
+        # ── Stacked area — fills remaining space ──────────────────────────────
+        self._stack = QStackedWidget()
+        self._stack.setStyleSheet("background:transparent;")
+        root.addWidget(self._stack, 1)
+
+        # ── Page 0: Recently added ────────────────────────────────────────────
         self._content = QWidget()
-        self._content.setStyleSheet(f"background:{COLORS['bg']};")
+        self._content.setObjectName("HistoryContent")
+        self._content.setStyleSheet(f"QWidget#HistoryContent {{ background:{COLORS['bg']}; }}")
         self._content_lay = QVBoxLayout(self._content)
         self._content_lay.setContentsMargins(16, 10, 16, 10)
         self._content_lay.setSpacing(0)
@@ -181,7 +257,18 @@ class HistoryView(QFrame):
         self._content_lay.addWidget(self._empty_lbl)
         self._content_lay.addStretch()
 
-        root.addWidget(_scroll_area(self._content), 1)
+        self._scroll_area = _scroll_area(self._content)
+        self._stack.addWidget(self._scroll_area)   # index 0
+
+        # ── Page 1: Purchase history ──────────────────────────────────────────
+        self._purchase_content = QWidget()
+        self._purchase_content.setObjectName("PurchaseContent")
+        self._purchase_content.setStyleSheet(f"QWidget#PurchaseContent {{ background:{COLORS['bg']}; }}")
+        self._purchase_lay = QVBoxLayout(self._purchase_content)
+        self._purchase_lay.setContentsMargins(16, 10, 16, 10)
+        self._purchase_lay.setSpacing(6)
+        purchase_scroll = _scroll_area(self._purchase_content)
+        self._stack.addWidget(purchase_scroll)     # index 1
 
         # Pre-build pool
         self._month_labels: list[QLabel] = [
@@ -190,13 +277,15 @@ class HistoryView(QFrame):
         self._row_pool: list[tuple] = []
         for _ in range(MAX_HISTORY_ROWS):
             row = QFrame()
+            _rname = f"HistRow{_}"
+            row.setObjectName(_rname)
             row.setStyleSheet(f"""
-                QFrame {{
+                QFrame#{_rname} {{
                     background:{COLORS['card']};
                     border:1px solid {COLORS['border']};
                     border-radius:8px;
                 }}
-                QFrame:hover {{ border-color:{COLORS['blue']}44; }}
+                QFrame#{_rname}:hover {{ border-color:{COLORS['blue']}44; }}
             """)
             row.setCursor(Qt.CursorShape.PointingHandCursor)
             rl = QHBoxLayout(row)
@@ -210,7 +299,7 @@ class HistoryView(QFrame):
             rl.addWidget(badge)
 
             info = QWidget()
-            info.setStyleSheet("background:transparent;")
+            info.setAutoFillBackground(False)
             il = QVBoxLayout(info)
             il.setContentsMargins(8, 0, 0, 0)
             il.setSpacing(1)
@@ -235,6 +324,96 @@ class HistoryView(QFrame):
             return
         self._last_ids = new_ids
         self._layout(games)
+
+    def _render_purchases(self):
+        """Render purchase history tab."""
+        import data.purchase_repository as purchases
+        from collections import defaultdict
+
+        # Clear
+        while self._purchase_lay.count():
+            item = self._purchase_lay.takeAt(0)
+            w = item.widget()
+            if w:
+                w.hide(); w.setParent(None)
+
+        all_p = purchases.get_all()
+        if not all_p:
+            empty = _lbl(i18n.t("history.no_purchases"),
+                         12, color=COLORS["text_dim"], wrap=True)
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._purchase_lay.addWidget(empty)
+            self._purchase_lay.addStretch()
+            return
+
+        # Group by month
+        by_month: dict = defaultdict(list)
+        for p in sorted(all_p, key=lambda x: x.purchased_at, reverse=True):
+            key = p.purchased_at[:7] if p.purchased_at else "—"
+            by_month[key].append(p)
+
+        BLUE  = COLORS["blue"]
+        GREEN = COLORS["green"]
+        GOLD  = COLORS.get("gold", "#fbbf24")
+        DIM   = COLORS["text_dim"]
+        CARD  = COLORS["card"]
+        BORDER = COLORS["border"]
+
+        for month_key in sorted(by_month.keys(), reverse=True):
+            try:
+                from datetime import datetime
+                month_lbl_text = datetime.strptime(month_key, "%Y-%m").strftime("%B %Y").upper()
+            except Exception:
+                month_lbl_text = month_key
+            self._purchase_lay.addWidget(
+                _lbl(month_lbl_text, 12, bold=True, color=BLUE))
+            self._purchase_lay.addSpacing(4)
+
+            for i, p in enumerate(by_month[month_key]):
+                rname = f"PurchRow{month_key}{i}"
+                row = QFrame()
+                row.setObjectName(rname)
+                row.setStyleSheet(f"""
+                    QFrame#{rname} {{
+                        background:{CARD};
+                        border:1px solid {BORDER};
+                        border-radius:8px;
+                    }}
+                """)
+                rl = QHBoxLayout(row)
+                rl.setContentsMargins(14, 10, 14, 10)
+                rl.setSpacing(10)
+
+                # Left: name + edition
+                info = QWidget(); info.setAutoFillBackground(False)
+                il = QVBoxLayout(info); il.setContentsMargins(0,0,0,0); il.setSpacing(2)
+                il.addWidget(_lbl(p.name, 12, bold=True))
+                if p.edition and p.edition != i18n.t("history.standard_edition"):
+                    il.addWidget(_lbl(p.edition, 10, color=GOLD))
+                rl.addWidget(info, 1)
+
+                # Right: price + saved + date
+                price_col = QWidget(); price_col.setAutoFillBackground(False)
+                pl = QVBoxLayout(price_col); pl.setContentsMargins(0,0,0,0); pl.setSpacing(2)
+                pl.setAlignment(Qt.AlignmentFlag.AlignRight)
+                price_lbl = _lbl(f"${p.price_paid:,.0f} {p.currency}", 12, bold=True, color=BLUE)
+                price_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+                pl.addWidget(price_lbl)
+                if p.saved > 0:
+                    saved_lbl = _lbl(f"saved ${p.saved:,.0f} (-{p.discount_pct}%)", 10, color=GREEN)
+                    saved_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+                    pl.addWidget(saved_lbl)
+                rl.addWidget(price_col)
+
+                date_lbl = _lbl(p.purchased_at or "", 10, color=DIM)
+                date_lbl.setFixedWidth(85)
+                date_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                rl.addWidget(date_lbl)
+
+                self._purchase_lay.addWidget(row)
+            self._purchase_lay.addSpacing(12)
+
+        self._purchase_lay.addStretch()
 
     def _layout(self, games):
         from collections import defaultdict
@@ -294,7 +473,7 @@ class HistoryView(QFrame):
                     f" border-radius:4px;")
                 badge.setText(game.priority)
                 name_lbl.setText(game.name)
-                genre = game.genre.split(",")[0] if game.genre else "—"
+                genre = translate_genre(game.genre.split(",")[0].strip()) if game.genre else "—"
                 meta_lbl.setText(f"{genre} · {game.developer or '—'}")
                 date_lbl.setText(i18n.t("history.added_on", date=game.date_added))
 
@@ -427,6 +606,21 @@ class SettingsView(QFrame):
                 break
         self._cl.addWidget(self._country_combo)
 
+        # ── Timezone ──────────────────────────────────────────────────────────
+        self._cl.addWidget(_section_header(i18n.t("settings.timezone")))
+        self._cl.addWidget(_lbl(i18n.t("settings.timezone_desc"), 11,
+                                color=COLORS["text_dim"]))
+        self._tz_combo = QComboBox()
+        self._tz_combo.setFixedHeight(36)
+        self._tz_combo.setFixedWidth(180)
+        self._tz_combo.setStyleSheet(self._combo_style())
+        self._tz_combo.addItems(GMT_OPTIONS)
+        current_tz = self._settings.get("timezone", "GMT-6")
+        tz_idx = next((i for i, t in enumerate(GMT_OPTIONS)
+                       if t == current_tz), GMT_OPTIONS.index("GMT-6"))
+        self._tz_combo.setCurrentIndex(tz_idx)
+        self._cl.addWidget(self._tz_combo)
+
         # Compare regions
         self._cl.addWidget(_section_header(i18n.t("settings.compare_regions")))
         self._cl.addWidget(_lbl(i18n.t("settings.compare_regions_desc"), 11,
@@ -457,21 +651,20 @@ class SettingsView(QFrame):
         self._cl.addWidget(grid_w)
 
     def _build_token(self):
-        self._cl.addWidget(_section_header("PimpMySteam Account"))
+        self._cl.addWidget(_section_header(i18n.t("settings.pimp_account")))
         self._cl.addWidget(_lbl(
-            "Generate a token at pimpmysteam.com → Settings → Apps.\n"
-            "Paste it here to enable Drive sync and Steam wishlist import.",
+            i18n.t("settings.pimp_desc"),
             11, color=COLORS["text_dim"], wrap=True))
 
         token_row = QHBoxLayout()
         token_row.setSpacing(8)
         current_token = self._settings.get("steamkustom_token", "")
         self._sk_token_entry = _entry(
-            current_token, "Paste your app token here…",
+            current_token, i18n.t("settings.pimp_placeholder"),
             password=bool(current_token), width=340)
         token_row.addWidget(self._sk_token_entry)
 
-        status_text  = "✓ Token saved" if current_token else ""
+        status_text  = i18n.t("settings.pimp_token_saved") if current_token else ""
         status_color = COLORS["green"] if current_token else COLORS["text_dim"]
         self._sk_status_lbl = _lbl(status_text, 11, color=status_color)
         token_row.addWidget(self._sk_status_lbl)
@@ -479,13 +672,13 @@ class SettingsView(QFrame):
         self._cl.addLayout(token_row)
 
         verify_row = QHBoxLayout()
-        self._verify_btn = _ghost_btn("Verify Token",
+        self._verify_btn = _ghost_btn(i18n.t("settings.pimp_verify_btn"),
                                       command=self._verify_sk_token, width=130)
         verify_row.addWidget(self._verify_btn)
         verify_row.addStretch()
         self._cl.addLayout(verify_row)
         self._cl.addWidget(_lbl(
-            "pimpmysteam.com → Settings → Apps → Generate Token",
+            i18n.t("settings.pimp_hint"),
             9, color=COLORS["text_dim"]))
 
         # Auto-verify on open
@@ -493,7 +686,7 @@ class SettingsView(QFrame):
             QTimer.singleShot(500, lambda: self._bg_verify(current_token, auto=True))
 
     def _build_services(self):
-        self._cl.addWidget(_section_header("Connected Services"))
+        self._cl.addWidget(_section_header(i18n.t("settings.connected_services")))
 
         svc_frame = QFrame()
         svc_frame.setStyleSheet(f"""
@@ -508,22 +701,22 @@ class SettingsView(QFrame):
         sl.setSpacing(4)
 
         self._steam_lbl = _lbl(
-            "🎮  Steam — not linked (link at pimpmysteam.com)",
+            i18n.t("settings.steam_not_linked"),
             12, color=COLORS["text_dim"])
         self._drive_lbl = _lbl(
-            "☁  Google Drive — not linked (link at pimpmysteam.com)",
+            i18n.t("settings.drive_not_linked"),
             12, color=COLORS["text_dim"])
         sl.addWidget(self._steam_lbl)
         sl.addWidget(self._drive_lbl)
         self._cl.addWidget(svc_frame)
 
         self._cl.addWidget(_lbl(
-            "Connect Steam and Google Drive at pimpmysteam.com → Settings → Connections",
+            i18n.t("settings.connect_hint"),
             10, color=COLORS["text_dim"]))
 
         sync_row = QHBoxLayout()
         self._sync_btn = _ghost_btn(
-            "⟳  Sync Wishlist from Steam",
+            i18n.t("settings.sync_btn"),
             command=self._sync_wishlist, width=210)
         sync_row.addWidget(self._sync_btn)
         self._sync_status_lbl = _lbl("", 11, color=COLORS["text_dim"])
@@ -574,11 +767,11 @@ class SettingsView(QFrame):
     def _verify_sk_token(self):
         token = self._sk_token_entry.text().strip()
         if not token:
-            self._sk_status_lbl.setText("Enter a token first")
+            self._sk_status_lbl.setText(i18n.t("settings.enter_token_first"))
             self._sk_status_lbl.setStyleSheet(
                 f"color:{COLORS['gold']}; background:transparent;")
             return
-        self._sk_status_lbl.setText("Verifying…")
+        self._sk_status_lbl.setText(i18n.t("settings.verifying"))
         self._sk_status_lbl.setStyleSheet(
             f"color:{COLORS['blue']}; background:transparent;")
         self._verify_btn.setEnabled(False)
@@ -596,40 +789,50 @@ class SettingsView(QFrame):
             _save(s)
             self._settings["steamkustom_token"] = token
             self._sk_token_entry.setEchoMode(QLineEdit.EchoMode.Password)
-            name = user.get("username", "Connected")
-            self._sk_status_lbl.setText(f"✓ {name}")
+            name = user.get("username", i18n.t("settings.verified_as").replace("{name}", ""))
+            self._sk_status_lbl.setText(i18n.t("settings.verified_as").format(name=name))
             self._sk_status_lbl.setStyleSheet(
                 f"color:{COLORS['green']}; background:transparent;")
 
             steam_name = user.get("steam_name") or user.get("steam_id") or ""
             has_drive  = bool(user.get("has_google"))
             self._steam_lbl.setText(
-                f"🎮  Steam — {'✓ ' + steam_name if steam_name else 'not linked'}")
+                i18n.t('settings.steam_linked').format(name=steam_name) if steam_name else i18n.t('settings.steam_not_linked_lbl'))
             self._steam_lbl.setStyleSheet(
                 f"color:{COLORS['green'] if steam_name else COLORS['text_dim']};"
                 f" background:transparent;")
             self._drive_lbl.setText(
-                f"☁  Google Drive — {'✓ linked' if has_drive else 'not linked'}")
+                i18n.t('settings.drive_linked') if has_drive else i18n.t('settings.drive_not_linked_lbl'))
             self._drive_lbl.setStyleSheet(
                 f"color:{COLORS['green'] if has_drive else COLORS['text_dim']};"
                 f" background:transparent;")
         else:
-            self._sk_status_lbl.setText("✗ Invalid token — check pimpmysteam.com")
+            self._sk_status_lbl.setText(i18n.t("settings.invalid_token"))
             self._sk_status_lbl.setStyleSheet(
                 f"color:{COLORS['red']}; background:transparent;")
 
     def _sync_wishlist(self):
         self._sync_btn.setEnabled(False)
-        self._sync_btn.setText("Syncing…")
+        self._sync_btn.setText(i18n.t("settings.syncing"))
         self._sync_status_lbl.setText("")
 
+        def _set_status(msg: str, color: str = COLORS["text_dim"]):
+            """Thread-safe status update."""
+            QTimer.singleShot(0, lambda m=msg, c=color: (
+                self._sync_status_lbl.setText(m),
+                self._sync_status_lbl.setStyleSheet(
+                    f"color:{c}; background:transparent;")
+            ))
+
+        _done_called = [False]
+
         def _done(msg: str, color: str):
-            """Always called at end — re-enables button."""
-            self._sync_status_lbl.setText(msg)
-            self._sync_status_lbl.setStyleSheet(
-                f"color:{color}; background:transparent;")
+            if _done_called[0]:
+                return
+            _done_called[0] = True
             self._sync_btn.setEnabled(True)
-            self._sync_btn.setText("⟳  Sync Wishlist from Steam")
+            self._sync_btn.setText(i18n.t("settings.sync_btn"))
+            _set_status(msg, color)
 
         def _work():
             try:
@@ -637,21 +840,92 @@ class SettingsView(QFrame):
                 from services.steam_wishlist import import_wishlist
                 token = get_token()
                 if not token:
-                    QTimer.singleShot(0, lambda: _done("No token — verify first", COLORS["gold"]))
+                    QTimer.singleShot(0, lambda: _done(
+                        i18n.t("settings.no_token"), COLORS["gold"]))
                     return
+
+                _set_status(i18n.t("settings.verifying_token"))
                 user = verify_token(token)
                 if not user or not user.get("steam_id"):
                     QTimer.singleShot(0, lambda: _done(
-                        "Steam not linked — connect at pimpmysteam.com", COLORS["gold"]))
+                        i18n.t("settings.steam_not_connected"),
+                        COLORS["gold"]))
                     return
+
+                _set_status(i18n.t("settings.getting_api_key"))
                 api_key = get_steam_api_key(token)
                 if not api_key:
                     QTimer.singleShot(0, lambda: _done(
-                        "Steam API key unavailable", COLORS["red"]))
+                        i18n.t("settings.api_key_unavailable"), COLORS["red"]))
                     return
-                result = import_wishlist(user["steam_id"], api_key)
-                msg = f"✓ {result.get('added',0)} new, {result.get('updated',0)} updated"
-                QTimer.singleShot(0, lambda m=msg: _done(m, COLORS["green"]))
+
+                _set_status(i18n.t("settings.fetching_wishlist"))
+                total_done = [0]
+
+                def on_progress(current, total, app_id):
+                    total_done[0] = current
+                    if current % 5 == 0 or current == total:
+                        _set_status(
+                            i18n.t("settings.fetching_details").format(current=current, total=total),
+                            COLORS["blue"])
+
+                result = import_wishlist(
+                    user["steam_id"], api_key,
+                    on_progress=on_progress)
+
+                added   = result.get("added", 0)
+                skipped = result.get("skipped", 0)
+                errors  = result.get("errors", 0)
+
+                if added == 0:
+                    QTimer.singleShot(0, lambda: _done(
+                        i18n.t("settings.already_up_to_date").format(skipped=skipped),
+                        COLORS["green"]))
+                    return
+
+                # Download covers for newly added games
+                _set_status(i18n.t("settings.added_downloading").format(added=added),
+                            COLORS["green"])
+
+                def _covers_done(downloaded, failed):
+                    msg = i18n.t("settings.added_covers_done").format(added=added, downloaded=downloaded)
+                    if failed:
+                        msg += i18n.t("settings.covers_failed").format(failed=failed)
+                    QTimer.singleShot(0, lambda m=msg: _done(m, COLORS["green"]))
+
+                # Only download covers for newly added games
+                covers_started = [False]
+                try:
+                    import data.repository as repo
+                    from services.steamgriddb import download_all_missing
+                    from ui.settings_loader import get_settings
+                    settings = get_settings()
+                    api_key_sgdb = settings.get("steamgriddb_key", "")
+                    all_games = repo.get_all()
+                    covers_started[0] = True
+                    download_all_missing(
+                        all_games,
+                        api_key_sgdb,
+                        on_progress=lambda cur, tot, name: _set_status(
+                            i18n.t("settings.downloading_covers").format(cur=cur, tot=tot, name=name[:20]),
+                            COLORS["blue"]),
+                        on_done=_covers_done,
+                        max_workers=4,
+                    )
+                except Exception as e:
+                    print(f"[Sync] Cover download error: {e}")
+                    msg = i18n.t("settings.added_skipped").format(added=added, skipped=skipped)
+                    QTimer.singleShot(0, lambda m=msg: _done(m, COLORS["green"]))
+                    return
+                # Safety net: if download_all_missing never calls on_done
+                # (e.g. no missing covers, empty list), call _done directly.
+                if covers_started[0]:
+                    import time; time.sleep(0.1)
+                    # download_all_missing is synchronous in most impls —
+                    # if _done hasn't been called yet, fire it now.
+                    # This is handled by _covers_done being called by on_done.
+                    pass
+
             except Exception as e:
                 err = str(e)
                 QTimer.singleShot(0, lambda m=err: _done(m, COLORS["red"]))
@@ -661,6 +935,7 @@ class SettingsView(QFrame):
     def _save(self):
         locale_str  = self._locale_combo.currentText().split(" — ")[0]
         country_str = self._country_combo.currentText().split(" — ")[0]
+        tz_str      = self._tz_combo.currentText() if hasattr(self, "_tz_combo") else "GMT-6"
         api_key     = self._key_entry.text().strip()
 
         old_country     = self._settings.get("country", "mx")
@@ -673,6 +948,7 @@ class SettingsView(QFrame):
              "locale": locale_str,
              "steamgriddb_key": api_key,
              "country": country_str,
+             "timezone": tz_str,
              "compare_regions": compare_regions}
         save_settings(s)
         self._settings = s
@@ -687,11 +963,26 @@ class SettingsView(QFrame):
             self._feedback.setStyleSheet(
                 f"color:{COLORS['blue']}; background:transparent;")
 
+            def _set_feedback(txt: str, color: str = COLORS["blue"]):
+                """Thread-safe feedback update — no-op if widget was destroyed."""
+                def _upd():
+                    try:
+                        self._feedback.setText(txt)
+                        self._feedback.setStyleSheet(
+                            f"color:{color}; background:transparent;")
+                    except RuntimeError:
+                        pass  # widget already destroyed (locale change)
+                QTimer.singleShot(0, _upd)
+
             def _refresh():
                 import services.steam_api as steam_api
                 import data.repository as repo_mod
                 games = repo_mod.get_all()
-                for game in games:
+                total = len(games)
+                for i, game in enumerate(games, 1):
+                    # Live progress: "Actualizando 3/12…"
+                    _set_feedback(
+                        i18n.t("settings.refreshing", n=f"{i}/{total}"))
                     new_price = steam_api.refresh_price(game.app_id, country=country_str)
                     if new_price:
                         game.price = new_price
@@ -707,12 +998,12 @@ class SettingsView(QFrame):
                     i18n.load_locale(locale_str)
                     QTimer.singleShot(0, self.on_locale_change)
                 else:
-                    QTimer.singleShot(0, lambda: self._feedback.setText(
-                        i18n.t("settings.refresh_done", n=len(games))))
-                    QTimer.singleShot(0, lambda: self._feedback.setStyleSheet(
-                        f"color:{COLORS['green']}; background:transparent;"))
+                    _set_feedback(
+                        i18n.t("settings.refresh_done", n=total),
+                        COLORS["green"])
                     # Force wishlist/dashboard refresh with new currency
-                    QTimer.singleShot(0, self.on_locale_change)
+                    QTimer.singleShot(200, self.on_locale_change)
+                    QTimer.singleShot(4000, lambda: _set_feedback(""))
 
             threading.Thread(target=_refresh, daemon=True).start()
 

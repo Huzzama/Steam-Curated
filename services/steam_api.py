@@ -29,8 +29,10 @@ def clear_price_cache():
     _price_cache.clear()
 
 # ── HTTP session (reuse TCP connections) ──────────────────────────────────────
+import certifi as _certifi
 _SESSION = requests.Session()
 _SESSION.headers.update({"Accept-Language": "en-US,en;q=0.9"})
+_SESSION.verify = _certifi.where()  # fix SSL on macOS
 
 # ── App details cache (immutable data — cache forever per session) ────────────
 # Manual app details cache — only caches successes, never None
@@ -52,7 +54,8 @@ def _cached_app_details(app_id: str, country: str) -> Optional[dict]:
             _app_details_cache[key] = data  # only cache success
             return data
         return None
-    except Exception:
+    except Exception as _e:
+        print(f"[SteamAPI] _cached_app_details({app_id}, {country}) error: {_e}")
         return None  # don't cache failures
 
 

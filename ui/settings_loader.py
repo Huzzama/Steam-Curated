@@ -1,4 +1,3 @@
-"""Settings loader — thin wrapper used across the app."""
 import json
 from typing import Any
 

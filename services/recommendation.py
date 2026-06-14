@@ -1,13 +1,3 @@
-"""
-Smart buy recommendation engine.
-
-Combines:
-- Current price vs historical low (from SteamDB)
-- Sale calendar patterns (which sales historically include this genre/publisher)
-- Time of year proximity to known sales
-
-Returns a structured recommendation with reasoning and estimated next sale date.
-"""
 from datetime import date, datetime, timedelta
 from typing import Optional
 from data.models import Game, PriceInfo, PriceHistory
