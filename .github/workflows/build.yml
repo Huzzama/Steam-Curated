@@ -70,19 +70,7 @@ jobs:
 
       - name: Convert icon to .ico
         shell: pwsh
-        run: |
-          python -c "
-from PIL import Image
-import pathlib
-assets = pathlib.Path('assets')
-for ext in ['jpeg','jpg','png']:
-    src = assets / ('icon.' + ext)
-    if src.exists():
-        img = Image.open(src).convert('RGBA')
-        img.save(str(assets / 'icon.ico'), sizes=[(256,256),(128,128),(64,64),(32,32),(16,16)])
-        print('Converted ' + str(src) + ' to icon.ico')
-        break
-"
+        run: python packaging/make_icon_ico.py
 
       - name: Build
         shell: pwsh
