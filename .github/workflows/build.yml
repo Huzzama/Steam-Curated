@@ -11,11 +11,9 @@ permissions:
 
 jobs:
 
-  # ── macOS ─────────────────────────────────────────────────────────────────────
   build-macos:
     name: macOS (.app + .dmg)
     runs-on: macos-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +26,6 @@ jobs:
           pip install --upgrade pip
           pip install pyinstaller
           pip install -r requirements.txt
-          pip install PySide6
           python -c "import PySide6; print('PySide6 OK')"
 
       - name: Build .app
@@ -53,11 +50,9 @@ jobs:
           path: dist/SteamCurator-macOS.dmg
           retention-days: 7
 
-  # ── Windows ───────────────────────────────────────────────────────────────────
   build-windows:
     name: Windows (.exe zip)
     runs-on: windows-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -71,7 +66,6 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyinstaller
           python -m pip install -r requirements.txt
-          python -m pip install PySide6
           python -c "import PySide6; print('PySide6 OK')"
 
       - name: Convert icon to .ico
@@ -82,11 +76,11 @@ from PIL import Image
 import pathlib
 assets = pathlib.Path('assets')
 for ext in ['jpeg','jpg','png']:
-    src = assets / f'icon.{ext}'
+    src = assets / ('icon.' + ext)
     if src.exists():
         img = Image.open(src).convert('RGBA')
-        img.save(assets / 'icon.ico', sizes=[(256,256),(128,128),(64,64),(32,32),(16,16)])
-        print(f'Converted {src} to icon.ico')
+        img.save(str(assets / 'icon.ico'), sizes=[(256,256),(128,128),(64,64),(32,32),(16,16)])
+        print('Converted ' + str(src) + ' to icon.ico')
         break
 "
 
@@ -104,11 +98,9 @@ for ext in ['jpeg','jpg','png']:
           path: dist/SteamCurator-Windows.zip
           retention-days: 7
 
-  # ── Linux AppImage ─────────────────────────────────────────────────────────────
   build-linux:
     name: Linux (AppImage)
     runs-on: ubuntu-22.04
-
     steps:
       - uses: actions/checkout@v4
 
@@ -130,7 +122,6 @@ for ext in ['jpeg','jpg','png']:
         run: |
           pip install --upgrade pip pyinstaller
           pip install -r requirements.txt
-          pip install PySide6
           python -c "import PySide6; print('PySide6 OK')"
 
       - name: Build binary
@@ -153,24 +144,13 @@ for ext in ['jpeg','jpg','png']:
           mkdir -p AppDir/usr/bin
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
           cp -r dist/SteamCurator/* AppDir/usr/bin/
-
-          cat > AppDir/SteamCurator.desktop << 'DESKTOP'
-          [Desktop Entry]
-          Name=Steam Curator
-          Exec=SteamCurator
-          Icon=steamcurator
-          Type=Application
-          Categories=Game;Utility;
-          DESKTOP
-
-          printf '#!/bin/bash\nexec "$APPDIR/usr/bin/SteamCurator" "$@"\n' > AppDir/AppRun
+          printf "[Desktop Entry]\nName=Steam Curator\nExec=SteamCurator\nIcon=steamcurator\nType=Application\nCategories=Game;Utility;\n" > AppDir/SteamCurator.desktop
+          printf "#!/bin/bash\nexec \"\$APPDIR/usr/bin/SteamCurator\" \"\$@\"\n" > AppDir/AppRun
           chmod +x AppDir/AppRun
-
           if [ -f "assets/icon.png" ]; then
             cp assets/icon.png AppDir/steamcurator.png
             cp assets/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/steamcurator.png
           fi
-
           ARCH=x86_64 appimagetool AppDir dist/SteamCurator-Linux.AppImage
 
       - uses: actions/upload-artifact@v4
@@ -179,13 +159,11 @@ for ext in ['jpeg','jpg','png']:
           path: dist/SteamCurator-Linux.AppImage
           retention-days: 7
 
-  # ── GitHub Release ─────────────────────────────────────────────────────────────
   release:
     name: Create Release
     needs: [build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-
     steps:
       - uses: actions/checkout@v4
 
@@ -209,18 +187,18 @@ for ext in ['jpeg','jpg','png']:
 
             | Platform | File |
             |----------|------|
-            | 🍎 macOS | `SteamCurator-macOS.dmg` |
-            | 🪟 Windows | `SteamCurator-Windows.zip` |
-            | 🐧 Linux | `SteamCurator-Linux.AppImage` |
+            | macOS | `SteamCurator-macOS.dmg` |
+            | Windows | `SteamCurator-Windows.zip` |
+            | Linux | `SteamCurator-Linux.AppImage` |
 
-            **macOS:** Open DMG → drag to Applications.
-            **Windows:** Extract ZIP → run `SteamCurator.exe`.
+            **macOS:** Open DMG and drag to Applications.
+            **Windows:** Extract ZIP and run `SteamCurator.exe`.
             **Linux:** `chmod +x SteamCurator-Linux.AppImage && ./SteamCurator-Linux.AppImage`
 
             ### Connect to PimpMySteam
-            1. Create account at [pimpmysteam.com](https://pimpmysteam.com)
-            2. Settings → Apps → Generate Token
-            3. Paste in Steam Curator → Settings → PimpMySteam Account → Verify
+            1. Create account at pimpmysteam.com
+            2. Settings > Apps > Generate Token
+            3. Paste in Steam Curator > Settings > PimpMySteam Account > Verify
           files: |
             artifacts/macos-dmg/SteamCurator-macOS.dmg
             artifacts/windows-zip/SteamCurator-Windows.zip
