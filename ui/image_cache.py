@@ -1,11 +1,3 @@
-"""
-Global LRU image cache — PySide6 version.
-Returns QPixmap objects instead of CTkImage.
-- O(1) set-based key lookup
-- Pre-computed placeholder per size
-- BILINEAR resize (2-3x faster than LANCZOS for thumbnails)
-- Max 300 entries
-"""
 from collections import OrderedDict
 from pathlib import Path
 from typing import Optional

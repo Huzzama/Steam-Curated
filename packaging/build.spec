@@ -6,7 +6,7 @@ ROOT = Path(SPECPATH).parent
 
 def find_icon(exts):
     for ext in exts:
-        for d in [ROOT / 'assets', ROOT]:
+        for d in [ROOT / 'assets', ROOT / 'app' / 'assets', ROOT]:
             p = d / f'icon{ext}'
             if p.exists(): return str(p)
     return None
@@ -14,10 +14,10 @@ def find_icon(exts):
 block_cipher = None
 
 datas = []
-if (ROOT / 'locales').exists():
-    datas.append((str(ROOT / 'locales'), 'locales'))
-if (ROOT / 'assets').exists():
-    datas.append((str(ROOT / 'assets'), 'assets'))
+for folder in ['locales', 'assets', 'app/assets']:
+    p = ROOT / folder
+    if p.exists():
+        datas.append((str(p), folder))
 
 a = Analysis(
     [str(ROOT / 'main.py')],
@@ -25,14 +25,17 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=[
-        # CustomTkinter
-        'customtkinter',
-        'customtkinter.windows',
-        'customtkinter.windows.widgets',
-        'customtkinter.windows.widgets.appearance_mode',
-        'customtkinter.windows.widgets.scaling',
-        'tkinter', 'tkinter.ttk', 'tkinter.font',
-        '_tkinter',
+        # PySide6 — core
+        'PySide6',
+        'PySide6.QtCore',
+        'PySide6.QtGui',
+        'PySide6.QtWidgets',
+        'PySide6.QtNetwork',
+        'PySide6.QtSvg',
+        'PySide6.QtSvgWidgets',
+        'PySide6.QtWebEngineWidgets',
+        'PySide6.QtWebEngineCore',
+        'PySide6.QtMultimedia',
         # PIL
         'PIL', 'PIL._tkinter_finder',
         'PIL.Image', 'PIL.ImageDraw', 'PIL.ImageFilter',
@@ -41,7 +44,8 @@ a = Analysis(
         'PIL.BmpImagePlugin', 'PIL.GifImagePlugin',
         # Matplotlib
         'matplotlib', 'matplotlib.pyplot',
-        'matplotlib.backends.backend_tkagg',
+        'matplotlib.backends.backend_qt5agg',
+        'matplotlib.backends.backend_qtagg',
         'matplotlib.backends.backend_agg',
         'matplotlib.figure',
         # Google
@@ -64,11 +68,12 @@ a = Analysis(
         'cryptography',
         # Other
         'packaging', 'dateutil', 'pytz',
-        'numpy', 'six',
+        'numpy', 'six', 'pyotp',
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=['pytest', 'test', 'tests', 'IPython', 'jupyter'],
+    excludes=['pytest', 'test', 'tests', 'IPython', 'jupyter',
+              'tkinter', 'customtkinter', '_tkinter'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -91,7 +96,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,          # UPX can break on macOS — disabled
+    upx=False,
     console=False,
     icon=icon,
 )
@@ -121,7 +126,6 @@ if sys.platform == 'darwin':
             'CFBundleVersion': '1.0.0',
             'CFBundleShortVersionString': '1.0.0',
             'CFBundleIconFile': 'icon',
-            # Permissions
             'NSDocumentsFolderUsageDescription': 'Steam Curator needs access to save your wishlist data.',
             'NSDesktopFolderUsageDescription': 'Steam Curator needs access to your desktop.',
         },

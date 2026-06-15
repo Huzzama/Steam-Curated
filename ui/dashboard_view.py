@@ -1,4 +1,3 @@
-"""DashboardView — PySide6 + Matplotlib embedded charts."""
 import hashlib
 import json
 

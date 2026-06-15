@@ -1,6 +1,3 @@
-"""
-AppWindow — PySide6 main window.
-"""
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QStackedLayout,
     QFrame, QLabel, QPushButton,

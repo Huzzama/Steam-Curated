@@ -11,18 +11,13 @@ permissions:
 
 jobs:
 
-  # ── macOS ────────────────────────────────────────────────────────────────────
+  # ── macOS ─────────────────────────────────────────────────────────────────────
   build-macos:
     name: macOS (.app + .dmg)
     runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Python with tkinter via Homebrew
-        run: |
-          brew install python-tk@3.11 || true
-          brew install python@3.11 || true
 
       - uses: actions/setup-python@v5
         with:
@@ -33,9 +28,8 @@ jobs:
           pip install --upgrade pip
           pip install pyinstaller
           pip install -r requirements.txt
-          # Ensure tkinter is importable
-          python -c "import tkinter; print('tkinter OK')"
-          python -c "import customtkinter; print('customtkinter OK')"
+          pip install PySide6
+          python -c "import PySide6; print('PySide6 OK')"
 
       - name: Build .app
         run: pyinstaller packaging/build.spec --clean --noconfirm
@@ -59,7 +53,7 @@ jobs:
           path: dist/SteamCurator-macOS.dmg
           retention-days: 7
 
-  # ── Windows ──────────────────────────────────────────────────────────────────
+  # ── Windows ───────────────────────────────────────────────────────────────────
   build-windows:
     name: Windows (.exe zip)
     runs-on: windows-latest
@@ -77,7 +71,24 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyinstaller
           python -m pip install -r requirements.txt
-          python -c "import tkinter; print('tkinter OK')"
+          python -m pip install PySide6
+          python -c "import PySide6; print('PySide6 OK')"
+
+      - name: Convert icon to .ico
+        shell: pwsh
+        run: |
+          python -c "
+from PIL import Image
+import pathlib
+assets = pathlib.Path('assets')
+for ext in ['jpeg','jpg','png']:
+    src = assets / f'icon.{ext}'
+    if src.exists():
+        img = Image.open(src).convert('RGBA')
+        img.save(assets / 'icon.ico', sizes=[(256,256),(128,128),(64,64),(32,32),(16,16)])
+        print(f'Converted {src} to icon.ico')
+        break
+"
 
       - name: Build
         shell: pwsh
@@ -93,7 +104,7 @@ jobs:
           path: dist/SteamCurator-Windows.zip
           retention-days: 7
 
-  # ── Linux AppImage ────────────────────────────────────────────────────────────
+  # ── Linux AppImage ─────────────────────────────────────────────────────────────
   build-linux:
     name: Linux (AppImage)
     runs-on: ubuntu-22.04
@@ -109,17 +120,23 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            python3-tk tk-dev libfuse2 fuse \
-            python3-pil python3-pil.imagetk
+            libfuse2 fuse \
+            libglib2.0-0 libgl1-mesa-glx \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 \
+            libxcb-xkb1 libxkbcommon-x11-0 libdbus-1-3
 
       - name: Install Python deps
         run: |
           pip install --upgrade pip pyinstaller
           pip install -r requirements.txt
-          python -c "import tkinter; print('tkinter OK')"
+          pip install PySide6
+          python -c "import PySide6; print('PySide6 OK')"
 
       - name: Build binary
-        run: pyinstaller packaging/build.spec --clean --noconfirm
+        run: |
+          export QT_QPA_PLATFORM=offscreen
+          pyinstaller packaging/build.spec --clean --noconfirm
 
       - name: Prepare icon
         run: python3 packaging/make_icon.py
@@ -162,7 +179,7 @@ jobs:
           path: dist/SteamCurator-Linux.AppImage
           retention-days: 7
 
-  # ── GitHub Release ────────────────────────────────────────────────────────────
+  # ── GitHub Release ─────────────────────────────────────────────────────────────
   release:
     name: Create Release
     needs: [build-macos, build-windows, build-linux]

@@ -6,8 +6,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 echo "▸ Installing dependencies…"
-pip install pyinstaller pillow customtkinter requests python-i18n \
-    google-auth google-auth-oauthlib google-api-python-client matplotlib
+pip install pyinstaller pillow requests python-i18n \
+    google-auth google-auth-oauthlib google-api-python-client \
+    matplotlib numpy pandas openpyxl beautifulsoup4 lxml \
+    python-jose cryptography pyotp PySide6
 
 echo "▸ Building binary…"
 pyinstaller packaging/build.spec --clean --noconfirm
@@ -36,7 +38,6 @@ exec "\$APPDIR/usr/bin/SteamCurator" "\$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
 
-# Copy icon if exists
 if [ -f "$ROOT/assets/icon.png" ]; then
     cp "$ROOT/assets/icon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/steamcurator.png"
     cp "$ROOT/assets/icon.png" "$APPDIR/steamcurator.png"
@@ -49,6 +50,5 @@ if command -v appimagetool &>/dev/null; then
 else
     echo "appimagetool not found. Download from:"
     echo "https://github.com/AppImage/appimagetool/releases"
-    echo ""
     echo "Then run: appimagetool $APPDIR dist/SteamCurator-Linux.AppImage"
 fi

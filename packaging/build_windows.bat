@@ -4,8 +4,11 @@ set ROOT=%~dp0..
 cd /d %ROOT%
 
 echo Installing dependencies...
-pip install pyinstaller pillow customtkinter requests python-i18n ^
-    google-auth google-auth-oauthlib google-api-python-client matplotlib
+pip install pyinstaller pillow requests python-i18n ^
+    google-auth google-auth-oauthlib google-api-python-client ^
+    matplotlib numpy pandas openpyxl beautifulsoup4 lxml ^
+    python-jose cryptography pyotp ^
+    PySide6
 
 echo Building .exe...
 pyinstaller packaging/build.spec --clean --noconfirm
