@@ -38,10 +38,22 @@ def main():
     # Background Drive sync on startup
     _auto_sync_drive_startup()
 
+    # ── macOS: must be set BEFORE QApplication is created ─────────────────────
+    if sys.platform == "darwin":
+        # Prevents Qt from fighting macOS over the menu bar and window focus,
+        # which was causing secondary windows (Deals, Dashboard, etc.) to open
+        # behind the main window or never become visible.
+        import os
+        os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")
+
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QFontDatabase
     from ui.app_window import AppWindow
+
+    # ── macOS: AA_DontUseNativeMenuBar keeps the sidebar nav reliable ─────────
+    if sys.platform == "darwin":
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeMenuBar, True)
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -56,25 +68,15 @@ def main():
     # Dark palette
     from PySide6.QtGui import QPalette, QColor
     palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window,      QColor(9,9,11))
-    palette.setColor(QPalette.ColorRole.WindowText,  QColor(244,244,245))
-    palette.setColor(QPalette.ColorRole.Base,        QColor(20,20,24))
-    palette.setColor(QPalette.ColorRole.Text,        QColor(244,244,245))
-    palette.setColor(QPalette.ColorRole.Button,      QColor(20,20,24))
-    palette.setColor(QPalette.ColorRole.ButtonText,  QColor(244,244,245))
-    palette.setColor(QPalette.ColorRole.Highlight,   QColor(96,165,250))
+    palette.setColor(QPalette.ColorRole.Window,          QColor(9,9,11))
+    palette.setColor(QPalette.ColorRole.WindowText,      QColor(244,244,245))
+    palette.setColor(QPalette.ColorRole.Base,            QColor(20,20,24))
+    palette.setColor(QPalette.ColorRole.Text,            QColor(244,244,245))
+    palette.setColor(QPalette.ColorRole.Button,          QColor(20,20,24))
+    palette.setColor(QPalette.ColorRole.ButtonText,      QColor(244,244,245))
+    palette.setColor(QPalette.ColorRole.Highlight,       QColor(96,165,250))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(0,0,0))
     app.setPalette(palette)
-
-    # Force transparent label backgrounds app-wide — Qt inherits bg from parent otherwise
-    app.setStyleSheet("""
-        QLabel          { background-color: transparent; border: none; }
-        QWidget         { background-color: transparent; }
-        QFrame          { border: none; background-color: transparent; }
-        QScrollArea     { border: none; }
-        QPushButton     { border: none; }
-        QToolTip        { background-color: #141418; color: #f4f4f5; border: 1px solid #27272a; }
-    """)
 
     app.setStyleSheet("""
         QLabel      { background-color: transparent; border: none; }
@@ -87,6 +89,12 @@ def main():
 
     window = AppWindow()
     window.show()
+
+    # macOS: explicitly activate the app so all views get proper focus/paint events.
+    # Without this, views opened after launch (Deals, Dashboard, etc.) can appear
+    # blank because macOS never delivered the initial expose event to them.
+    if sys.platform == "darwin":
+        app.setActiveWindow(window)
 
     # Refresh sale images AFTER Qt is running — re-renders DealsView when done
     def _on_images_ready():

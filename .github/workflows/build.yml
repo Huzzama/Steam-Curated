@@ -36,13 +36,18 @@ jobs:
           chmod -R 755 "dist/Steam Curator.app"
           xattr -cr "dist/Steam Curator.app" || true
 
-      - name: Create DMG
+      - name: Create DMG with Applications shortcut
         run: |
+          STAGING="$(mktemp -d)/dmg_staging"
+          mkdir -p "$STAGING"
+          cp -R "dist/Steam Curator.app" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
           hdiutil create \
             -volname "Steam Curator" \
-            -srcfolder "dist/Steam Curator.app" \
+            -srcfolder "$STAGING" \
             -ov -format UDZO \
             "dist/SteamCurator-macOS.dmg"
+          rm -rf "$STAGING"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -83,6 +83,27 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 if sys.platform == 'darwin':
+    # Generate .icns from source image if not already present
+    _icns_path = ROOT / 'assets' / 'icon.icns'
+    if not _icns_path.exists():
+        import subprocess, shutil
+        _src = next((ROOT / 'assets' / f'icon{e}'
+                     for e in ['.png', '.jpeg', '.jpg']
+                     if (ROOT / 'assets' / f'icon{e}').exists()), None)
+        if _src and shutil.which('sips') and shutil.which('iconutil'):
+            _iconset = ROOT / 'assets' / 'icon.iconset'
+            _iconset.mkdir(exist_ok=True)
+            for _size in [16, 32, 64, 128, 256, 512]:
+                subprocess.run(['sips', '-z', str(_size), str(_size),
+                                str(_src), '--out',
+                                str(_iconset / f'icon_{_size}x{_size}.png')],
+                               capture_output=True)
+                subprocess.run(['sips', '-z', str(_size*2), str(_size*2),
+                                str(_src), '--out',
+                                str(_iconset / f'icon_{_size}x{_size}@2x.png')],
+                               capture_output=True)
+            subprocess.run(['iconutil', '-c', 'icns', str(_iconset),
+                            '-o', str(_icns_path)], capture_output=True)
     icon = find_icon(['.icns', '.png', '.jpg', '.jpeg'])
 elif sys.platform == 'win32':
     icon = find_icon(['.ico', '.png', '.jpg', '.jpeg'])
@@ -126,7 +147,9 @@ if sys.platform == 'darwin':
             'CFBundleVersion': '1.0.0',
             'CFBundleShortVersionString': '1.0.0',
             'CFBundleIconFile': 'icon',
+            'LSUIElement': False,
+            'NSSupportsAutomaticGraphicsSwitching': True,
             'NSDocumentsFolderUsageDescription': 'Steam Curator needs access to save your wishlist data.',
-            'NSDesktopFolderUsageDescription': 'Steam Curator needs access to your desktop.',
+            'NSDesktopFolderUsageDescription':   'Steam Curator needs access to your desktop.',
         },
     )

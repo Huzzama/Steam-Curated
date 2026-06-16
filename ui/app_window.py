@@ -291,7 +291,14 @@ class AppWindow(QMainWindow):
         # Parent the view to the container without a layout — positions are
         # managed manually so slide_transition can animate freely.
         view.setParent(self._container)
-        view.setGeometry(self._container.rect())
+        # Give the view its real geometry immediately — on macOS, views built
+        # while hidden and never resized before being shown get 0x0 geometry,
+        # which means scroll areas and charts never paint.
+        rect = self._container.rect()
+        if rect.width() == 0 or rect.height() == 0:
+            from PySide6.QtCore import QRect
+            rect = QRect(0, 0, _MIN_W, _MIN_H)
+        view.setGeometry(rect)
         view.hide()
         self._views[key] = view
         return view
@@ -334,6 +341,15 @@ class AppWindow(QMainWindow):
         safe_show_view(current, view,
                        from_key=prev_key, to_key=key,
                        duration=260)
+
+        # macOS: force a repaint after the animation so the new view
+        # is never left blank due to a missed expose event.
+        import sys as _sys
+        if _sys.platform == "darwin":
+            from PySide6.QtCore import QTimer as _QTimer
+            _QTimer.singleShot(280, lambda: (
+                view.update() if not view.isHidden() else None
+            ))
 
     # ── Detail panel ──────────────────────────────────────────────────────────
 
