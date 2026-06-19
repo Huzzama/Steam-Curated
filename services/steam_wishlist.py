@@ -49,6 +49,19 @@ def fetch_wishlist_with_details(
     for i, item in enumerate(raw_items):
         app_id = str(item.get("appid", ""))
         if not app_id:
+            # Previously this silently dropped the item with no trace —
+            # if Steam ever returns a wishlist entry without an "appid"
+            # (seen with delisted/removed apps), the game would vanish
+            # from the import entirely with no way to tell why the final
+            # count didn't match the Steam wishlist count. Still include
+            # a placeholder entry so it shows up (with a generic name)
+            # instead of disappearing, and log it so it's traceable.
+            print(f"[Wishlist] Item {i+1}/{total} has no appid — raw: {item}")
+            enriched.append({
+                "app_id":   f"unknown_{i}",
+                "name":     item.get("name") or f"Unknown wishlist item #{i+1}",
+                "priority": item.get("priority", 0),
+            })
             continue
 
         if on_progress:
@@ -130,13 +143,16 @@ def import_wishlist(
         steam_id64, api_key, country, on_progress=on_progress
     )
 
-    added   = 0
-    skipped = 0
-    errors  = 0
+    added    = 0
+    skipped  = 0
+    errors   = 0
+    dropped  = 0   # items with no usable app_id — should be 0 after the fix above
 
     for item in items:
         app_id = item.get("app_id", "")
         if not app_id:
+            dropped += 1
+            print(f"[Wishlist] Dropping item with no app_id: {item}")
             continue
 
         if skip_existing and app_id in existing_ids:
@@ -164,13 +180,24 @@ def import_wishlist(
             )
             repo.add(game)
             added += 1
-        except Exception:
+        except Exception as e:
             errors += 1
+            print(f"[Wishlist] Failed to add {item.get('name', app_id)}: {e}")
+
+    total_steam = len(items)
+    accounted   = added + skipped + errors + dropped
+    if accounted != total_steam:
+        # This should never happen after the fix above, but log loudly if
+        # it ever does again so a future "62 vs 65" report is traceable
+        # instead of a mystery.
+        print(f"[Wishlist] WARNING: accounted {accounted} != Steam total {total_steam} "
+              f"(added={added}, skipped={skipped}, errors={errors}, dropped={dropped})")
 
     return {
         "added":   added,
         "skipped": skipped,
         "errors":  errors,
+        "dropped": dropped,
         "total":   len(items),
     }
 

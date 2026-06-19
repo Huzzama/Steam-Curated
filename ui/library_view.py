@@ -18,6 +18,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from config import COLORS
 import data.repository as repo
 import data.purchase_repository as purchases
+from data.status import STATUS_PURCHASED, normalize_status
 import i18n
 
 # ── Colour aliases (all resolved from the single COLORS dict) ─────────────────
@@ -541,8 +542,8 @@ class LibraryView(QFrame):
     # ── Section 2: Steam Curator ──────────────────────────────────────────────
 
     def _render_curator_section(self, all_games: list, all_purchases: list):
-        wishlist = [g for g in all_games if g.status == "Wishlist"]
-        archived = [g for g in all_games if g.status == "Archivado"]
+        wishlist = [g for g in all_games if normalize_status(g.status) == "Wishlist"]
+        archived = [g for g in all_games if normalize_status(g.status) == "Archivado"]
 
         # Stats row
         row = _transparent_widget("CuratorRow1")
@@ -645,7 +646,12 @@ class LibraryView(QFrame):
     # ── Section 3: Estado ─────────────────────────────────────────────────────
 
     def _render_status_section(self, all_games: list):
-        comprados = [g for g in all_games if g.status == "Comprado"]
+        # normalize_status() catches games whose status was saved as a
+        # translated i18n string by an older version of the app (e.g.
+        # "Comprado", "Purchased", "Acheté"), so they still show up here
+        # instead of silently vanishing because the literal text didn't
+        # match "Comprado" exactly.
+        comprados = [g for g in all_games if normalize_status(g.status) == STATUS_PURCHASED]
         if not comprados:
             self._lay.addWidget(
                 _lbl(i18n.t("library.mark_to_see"), 10, color=DIM))

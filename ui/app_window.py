@@ -285,7 +285,8 @@ class AppWindow(QMainWindow):
             "recap":     lambda: __import__("ui.recap_view",
                              fromlist=["RecapView"]).RecapView(self._container),
             "settings":  lambda: SettingsView(self._container,
-                             on_locale_change=self._on_locale_change),
+                             on_locale_change=self._on_locale_change,
+                             on_data_changed=self._on_data_changed),
         }
         view = builders[key]()
         # Parent the view to the container without a layout — positions are
@@ -396,6 +397,24 @@ class AppWindow(QMainWindow):
             self._mark_dirty("dashboard", "deals", "recap", "library", "history")
         dlg = AddGameDialog(self, on_success=_on_add_success)
         dlg.exec()
+
+    def _on_data_changed(self):
+        """
+        Called when game data changes from a view OTHER than the one
+        currently showing it — e.g. a wishlist sync run from Settings.
+
+        Unlike _on_locale_change, this does NOT tear down and rebuild every
+        cached view (too heavy for a routine sync). It just marks every
+        game-data-dependent view dirty, and if "wishlist" happens to be one
+        of the currently cached views, refreshes it immediately so the
+        change is visible the moment the user navigates there — or right
+        away if Wishlist is somehow the active view.
+        """
+        self._mark_dirty("wishlist", "dashboard", "deals", "recap", "library", "history")
+        wishlist_view = self._views.get("wishlist")
+        if wishlist_view is not None and hasattr(wishlist_view, "reload_after_change"):
+            wishlist_view.reload_after_change()
+            self._dirty_views.discard("wishlist")
 
     # ── Locale / Country change ───────────────────────────────────────────────
 

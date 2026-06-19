@@ -782,12 +782,22 @@ class SettingsView(QFrame):
         if ok and user:
             token = self._sk_token_entry.text().strip()
             from ui.settings_loader import save_settings as _save
+            from services.steamkustom_auth import save_token
             s = load_settings()
             s["steamkustom_token"] = token
             if user.get("steam_id"):
                 s["steam_id64"] = user["steam_id"]
             _save(s)
             self._settings["steamkustom_token"] = token
+            # CRITICAL: get_token() (used by _sync_wishlist, library_api.py,
+            # and anywhere else that needs to call the PimpMySteam backend)
+            # reads from ~/.config/pimpmysteam/creds.json via save_token(),
+            # NOT from settings.json. Writing only to settings.json above
+            # left get_token() always returning None even though the
+            # Settings screen showed "verified" (it reads settings.json
+            # directly) — which silently broke every feature that depends
+            # on get_token(): wishlist sync, library stats, etc.
+            save_token(token)
             self._sk_token_entry.setEchoMode(QLineEdit.EchoMode.Password)
             name = user.get("username", i18n.t("settings.verified_as").replace("{name}", ""))
             self._sk_status_lbl.setText(i18n.t("settings.verified_as").format(name=name))

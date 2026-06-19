@@ -14,6 +14,7 @@ import i18n
 from ui.library_view import translate_genre
 import data.repository as repo
 from data.models import Game
+from data.status import STATUS_PURCHASED, normalize_status
 from config import COLORS, PRIORITY_COLORS, PRIORITY_OPTIONS
 from ui.widgets import SteamButton, StatCard, SectionHeader
 
@@ -275,6 +276,12 @@ class WishlistView(QFrame):
         tb.addWidget(covers_btn)
         self._covers_btn = covers_btn
 
+        prices_btn = SteamButton(text=i18n.t("wishlist.refresh_prices_btn"),
+                                 command=self._refresh_all_prices, style="ghost")
+        prices_btn.setFixedHeight(30)
+        tb.addWidget(prices_btn)
+        self._prices_btn = prices_btn
+
         export_btn = SteamButton(text=i18n.t("actions.export"),
                                  command=self._export_excel, style="ghost")
         export_btn.setFixedHeight(30)
@@ -430,20 +437,24 @@ class WishlistView(QFrame):
             btn.setStyleSheet(self._filter_btn_style(active))
         self._apply_filter()
 
-    # Statuses that mean "still on the wishlist" — everything else is excluded.
-    # "Purchased" (and its i18n variants) are excluded from the main wishlist grid;
-    # they appear in the Library and Recap views instead.
-    _WISHLIST_STATUSES = {"Wishlist", "Archivado"}
+    # Status comparisons now go through data.status.normalize_status() —
+    # see that module for why we never compare g.status to a literal string.
 
     def _apply_filter(self):
         if self._filter == "purchased":
             # Show ONLY purchased games — the inverse of the main wishlist grid.
+            # normalize_status() maps legacy/translated status strings (from
+            # older app versions) back to the canonical STATUS_PURCHASED, so
+            # those games still appear here instead of vanishing entirely.
             games = [g for g in self._games
-                     if g.status not in self._WISHLIST_STATUSES and g.status]
+                     if normalize_status(g.status) == STATUS_PURCHASED]
         else:
-            # Exclude purchased / non-wishlist games from the main grid.
+            # Exclude purchased games from the main grid. Anything that
+            # normalizes to a non-purchased status — including unrecognized
+            # or corrupted status strings, which normalize_status() defaults
+            # to Wishlist rather than silently dropping — is shown here.
             games = [g for g in self._games
-                     if g.status in self._WISHLIST_STATUSES or not g.status]
+                     if normalize_status(g.status) != STATUS_PURCHASED]
             if self._filter == "sale":
                 games = [g for g in games if g.price and g.price.is_on_sale]
             elif self._filter in ("S","A","B","C"):
@@ -573,6 +584,10 @@ class WishlistView(QFrame):
     def _download_covers(self):
         from services.steamgriddb import download_all_missing, cover_exists
         from ui.settings_loader import get_settings
+        # Re-pull from the repository before counting "missing" — self._games
+        # can be stale if games were added/synced from another view (e.g.
+        # the Settings wishlist sync) since this view was last refreshed.
+        self._games = repo.get_all()
         settings = get_settings()
         missing  = sum(1 for g in self._games if not cover_exists(g.app_id))
         if missing == 0:
@@ -602,6 +617,41 @@ class WishlistView(QFrame):
         download_all_missing(
             self._games, settings.get("steamgriddb_key",""),
             on_progress=_prog, on_done=_done, max_workers=4,
+        )
+
+    def _refresh_all_prices(self):
+        from services.steam_api import bulk_refresh_prices
+        from ui.settings_loader import get_settings
+        # Always re-pull from disk first — same staleness concern as covers.
+        self._games = repo.get_all()
+        settings = get_settings()
+        country  = settings.get("country", "mx")
+        total    = len(self._games)
+        if total == 0:
+            return
+
+        self._prices_btn.setEnabled(False)
+        self._covers_lbl.setText(f"0/{total}")
+
+        def _prog(cur, tot, _name):
+            QTimer.singleShot(0, lambda c=cur, t=tot:
+                self._covers_lbl.setText(f"{c}/{t}"))
+
+        def _done(updated, unchanged, failed):
+            def _upd():
+                self._prices_btn.setEnabled(True)
+                self._covers_lbl.setText(
+                    i18n.t("wishlist.prices_updated").format(n=updated)
+                    if not failed else
+                    i18n.t("wishlist.prices_updated_with_errors").format(n=updated, fail=failed))
+                self._last_rendered_ids = []
+                self.refresh(force=True)
+                QTimer.singleShot(4000, lambda: self._covers_lbl.setText(""))
+            QTimer.singleShot(0, _upd)
+
+        bulk_refresh_prices(
+            self._games, country=country,
+            on_progress=_prog, on_done=_done, max_workers=6,
         )
 
     def _export_excel(self):

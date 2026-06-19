@@ -1,10 +1,3 @@
-"""
-Steam API service — optimized with:
-- LRU cache for app details (avoid redundant HTTP calls)
-- Set-based lookups for O(1) membership checks
-- Generator expressions instead of list comprehensions where possible
-- lru_cache for pure functions
-"""
 import time as _time
 from functools import lru_cache
 from typing import Optional
@@ -90,6 +83,140 @@ def refresh_price(app_id: str, country: str = "mx") -> Optional[PriceInfo]:
     if price:
         _price_cache[cache_key] = (price, _time.time())
     return price
+
+
+def bulk_refresh_prices(
+    games: list,
+    country: str = "mx",
+    on_progress: callable = None,
+    on_done: callable = None,
+    max_workers: int = 6,
+    force: bool = True,
+):
+    """
+    Refresh the price of every game in `games` against the live Steam API,
+    persisting any changes to the repository. Runs in a background thread —
+    non-blocking.
+
+    Without this, prices only ever update one game at a time when a user
+    happens to open that game's detail panel (game_detail_panel.py's
+    _refresh_prices) — sale prices for everything else go stale until
+    manually visited.
+
+    IMPORTANT — write strategy: the network calls run in parallel across
+    `max_workers` threads (that part benefits from concurrency — it's I/O
+    bound and Steam is the bottleneck), but NONE of those worker threads
+    touch the repository directly. Each worker only computes the new
+    price in memory. After every worker finishes, a single
+    repo.update_many() call writes everything to disk in one pass.
+
+    This used to call repo.update(game) from inside each worker thread —
+    that meant up to `max_workers` threads were each doing a full
+    read-modify-write of the entire wishlist.json concurrently, with no
+    lock. Two problems resulted: (1) it was a lost-update race — a later
+    thread's write could silently clobber an earlier thread's, so some
+    "updated" games never actually got their new price saved; and (2) up
+    to 60+ full-file disk writes serialized through Python's GIL kept the
+    main/UI thread starved long enough that the progress bar's
+    QTimer.singleShot(0, ...) callbacks all queued up and only flushed
+    at the very end — which looked exactly like "stuck at 0/N, then
+    jumps to done."
+
+    Args:
+        games:       list of Game objects (from repo.get_all())
+        country:     Steam store country code for pricing
+        on_progress: callback(current: int, total: int, game_name: str)
+        on_done:     callback(updated: int, unchanged: int, failed: int)
+        max_workers: parallel request threads (default 6)
+        force:       bypass the 1h price cache so every call hits Steam
+                     fresh (default True — a manual/sync-triggered refresh
+                     should never return stale cached data)
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import data.repository as repo
+
+    total = len(games)
+    if total == 0:
+        if on_done:
+            on_done(0, 0, 0)
+        return
+
+    counter      = [0]   # processed
+    unchanged_c  = [0]
+    failed_c     = [0]
+    to_save      = []    # games whose price actually changed — written once at the end
+    lock         = threading.Lock()
+
+    def _refresh_one(game):
+        """Network-only — never touches the repository."""
+        result = "failed"
+        try:
+            if force:
+                _app_details_cache.pop(f"{game.app_id}:{country}", None)
+                _price_cache.pop(f"{game.app_id}:{country}", None)
+            data = get_app_details(game.app_id, country=country)
+            new_price = parse_price(data) if data else None
+
+            if new_price is not None:
+                old_price = game.price
+                changed = (
+                    old_price is None
+                    or old_price.current != new_price.current
+                    or old_price.is_on_sale != new_price.is_on_sale
+                )
+                game.price = new_price
+                result = "updated" if changed else "unchanged"
+            else:
+                result = "failed"
+        except Exception:
+            result = "failed"
+
+        with lock:
+            counter[0] += 1
+            if result == "updated":
+                to_save.append(game)
+            elif result == "unchanged":
+                unchanged_c[0] += 1
+            else:
+                failed_c[0] += 1
+            current = counter[0]
+
+        if on_progress:
+            try:
+                on_progress(current, total, game.name)
+            except Exception:
+                pass
+
+    def _run():
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_refresh_one, g): g for g in games}
+            for f in as_completed(futures):
+                try:
+                    f.result()
+                except Exception:
+                    with lock:
+                        failed_c[0] += 1
+
+        # Single write pass for every game whose price actually changed —
+        # see the docstring above for why this replaced per-game writes.
+        updated_count = 0
+        if to_save:
+            try:
+                updated_count = repo.update_many(to_save)
+            except Exception as e:
+                print(f"[SteamAPI] bulk_refresh_prices: update_many failed: {e}")
+                with lock:
+                    failed_c[0] += len(to_save)
+                updated_count = 0
+
+        if on_done:
+            try:
+                on_done(updated_count, unchanged_c[0], failed_c[0])
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 @lru_cache(maxsize=128)

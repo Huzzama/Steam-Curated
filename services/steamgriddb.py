@@ -24,6 +24,31 @@ def get_game_id(app_id: str, api_key: str) -> Optional[str]:
         return None
 
 
+def get_game_id_by_name(game_name: str, api_key: str) -> Optional[str]:
+    """
+    Get SteamGridDB game ID by searching for the game's name.
+    Used as a fallback for very new releases that SteamGridDB hasn't yet
+    linked to their Steam AppID — the name search index updates faster
+    than the AppID-to-game mapping does.
+    Returns the first (best-ranked) search result, or None if nothing matches.
+    """
+    if not game_name:
+        return None
+    try:
+        s = _make_session(api_key)
+        resp = s.get(
+            f"{STEAMGRIDDB_BASE}/search/autocomplete/{game_name}",
+            timeout=10,
+        )
+        data = resp.json()
+        results = data.get("data", [])
+        if data.get("success") and results:
+            return str(results[0]["id"])
+        return None
+    except Exception:
+        return None
+
+
 def download_cover(app_id: str, api_key: str, game_name: str = "") -> Optional[str]:
     """
     Download the best vertical cover (600x900) for a game.
@@ -36,6 +61,12 @@ def download_cover(app_id: str, api_key: str, game_name: str = "") -> Optional[s
 
     try:
         sgdb_id = get_game_id(app_id, api_key)
+
+        # Fallback: new releases often aren't linked to their Steam AppID yet
+        # on SteamGridDB, even though a name-matched entry already exists.
+        if not sgdb_id and game_name:
+            sgdb_id = get_game_id_by_name(game_name, api_key)
+
         if not sgdb_id:
             return _fallback_steam_header(app_id)
 
@@ -124,21 +155,35 @@ def download_all_missing(
 
     counter    = [0]     # downloaded
     failed_c   = [0]     # failed
+    to_save    = []      # games whose cover_path changed — written once at the end
     lock       = threading.Lock()
 
     def _download_one(game):
-        path = download_cover(game.app_id, api_key, game.name)
+        # Network/disk-image-write only — never touches the repository.
+        # Batching the repo write at the end (see _run below) avoids
+        # serializing every game's save behind the same lock, which
+        # throttled throughput to roughly one disk write at a time even
+        # though downloads themselves ran in parallel.
+        path = None
+        try:
+            path = download_cover(game.app_id, api_key, game.name)
+        except Exception:
+            path = None
+
         with lock:
             counter[0] += 1
             if path:
                 game.cover_path = path
-                repo.update(game)
+                to_save.append(game)
             else:
                 failed_c[0] += 1
             current = counter[0]
 
         if on_progress:
-            on_progress(current, total, game.name)
+            try:
+                on_progress(current, total, game.name)
+            except Exception:
+                pass
         return path
 
     def _run():
@@ -151,7 +196,18 @@ def download_all_missing(
                     with lock:
                         failed_c[0] += 1
 
+        # Single write pass for every game whose cover actually downloaded.
+        downloaded_count = 0
+        if to_save:
+            try:
+                downloaded_count = repo.update_many(to_save)
+            except Exception as e:
+                print(f"[SteamGridDB] download_all_missing: update_many failed: {e}")
+                with lock:
+                    failed_c[0] += len(to_save)
+                downloaded_count = 0
+
         if on_done:
-            on_done(counter[0], failed_c[0])
+            on_done(downloaded_count, failed_c[0])
 
     threading.Thread(target=_run, daemon=True).start()

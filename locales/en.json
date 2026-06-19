@@ -163,6 +163,9 @@
     "fetching_wishlist": "Fetching wishlist from Steam…",
     "fetching_details": "Fetching game details… {current}/{total}",
     "already_up_to_date": "✓ Already up to date ({skipped} games)",
+    "refreshing_prices": "Refreshing prices…",
+    "refreshing_prices_progress": "Refreshing prices… {cur}/{tot} — {name}",
+    "prices_refreshed": "✓ {updated} prices updated",
     "added_downloading": "✓ {added} games added — downloading covers…",
     "added_covers_done": "✓ {added} games added, {downloaded} covers downloaded",
     "covers_failed": " ({failed} failed)",
@@ -455,6 +458,9 @@
     "covers_all_done": "✓ All done",
     "covers_result": "✓{dl} ✗{fail}",
     "covers_ok": "✓{dl}",
+    "refresh_prices_btn": "↻ Prices",
+    "prices_updated": "✓ {n} prices updated",
+    "prices_updated_with_errors": "✓{n} ✗{fail}",
     "no_match": "No games match the filter."
   },
   "widgets": {

@@ -438,8 +438,14 @@ class GameDetailPanel(QFrame):
 
         # Use price_data signal to deliver the full prices dict at once.
         # Disconnect stale slot from any previous game panel.
+        # PySide6 emits a harmless RuntimeWarning when disconnect() is
+        # called on a signal with nothing connected — suppress just that
+        # warning here rather than globally.
+        import warnings
         try:
-            self._sig.price_data.disconnect()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                self._sig.price_data.disconnect()
         except (RuntimeError, TypeError):
             pass
 

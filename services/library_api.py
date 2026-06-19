@@ -33,10 +33,21 @@ def _get_credentials() -> tuple[Optional[str], Optional[str]]:
         s        = get_settings()
         steam_id = s.get("steam_id64", "").strip() or None
         if not steam_id:
+            print("[LibraryAPI] No steam_id64 in settings.json — "
+                  "verify your token in Settings at least once to populate it")
             return None, None
 
-        from services.steamkustom_auth import get_steam_api_key
-        api_key = get_steam_api_key()
+        from services.steamkustom_auth import get_token, get_steam_api_key
+        token = get_token()
+        if not token:
+            print("[LibraryAPI] No PimpMySteam app token saved locally — "
+                  "paste/verify a token in Settings first")
+            return steam_id, None
+
+        api_key = get_steam_api_key(token)
+        if not api_key:
+            print("[LibraryAPI] get_steam_api_key(token) returned None — "
+                  "token may be invalid/expired or the backend call failed")
         return steam_id, api_key
     except Exception as e:
         print(f"[LibraryAPI] credentials error: {e}")

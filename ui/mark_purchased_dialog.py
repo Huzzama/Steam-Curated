@@ -11,6 +11,7 @@ from PySide6.QtGui import QFont
 
 from config import COLORS
 from data.models import Game, Purchase
+from data.status import STATUS_PURCHASED
 import data.purchase_repository as purchases
 import data.repository as repo
 import i18n
@@ -629,8 +630,11 @@ class MarkPurchasedDialog(QDialog):
             except Exception:
                 pass
 
-        # Mark game as purchased
-        self._game.status = i18n.t("mark_purchased.purchased_badge")
+        # Mark game as purchased. IMPORTANT: this must be the canonical,
+        # language-independent status constant — never a translated i18n
+        # string — or the game becomes invisible to every status filter
+        # the moment the locale changes (see data/status.py for details).
+        self._game.status = STATUS_PURCHASED
         repo.update(self._game)
 
         # Brief pulse before closing
