@@ -19,7 +19,7 @@ from config import COLORS, PRIORITY_COLORS, PRIORITY_OPTIONS
 from ui.widgets import SteamButton, StatCard, SectionHeader
 
 COLS     = 6
-MAX_ROWS = 8
+MAX_ROWS = 100
 CARD_W   = 148
 IMG_H    = 200
 
