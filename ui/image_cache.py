@@ -2,17 +2,19 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtGui import QPixmap, QColor, QPainter
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QPixmap
 from PIL import Image
 
 _CACHE: OrderedDict[str, QPixmap] = OrderedDict()
 _MAX_SIZE   = 300
 _KEY_SET: set[str] = set()
-_placeholder_cache: dict[tuple, QPixmap] = {}
 
 
-def get(path: Optional[str], size: tuple = (144, 200)) -> QPixmap:
+def get(path: Optional[str], size: tuple = (144, 200)) -> Optional[QPixmap]:
+    """Scaled cover pixmap, or None when there is no readable file
+    (CoverImage draws its own placeholder for None)."""
+    if not path:
+        return None
     key = f"{path}|{size[0]}x{size[1]}"
     if key in _KEY_SET:
         _CACHE.move_to_end(key)
@@ -42,7 +44,6 @@ def invalidate(app_id: str):
 def clear():
     _CACHE.clear()
     _KEY_SET.clear()
-    _placeholder_cache.clear()
 
 
 def _load(path: Optional[str], size: tuple) -> QPixmap:
@@ -65,19 +66,4 @@ def _load(path: Optional[str], size: tuple) -> QPixmap:
             return QPixmap.fromImage(qimg)
     except Exception:
         pass
-    return _placeholder(size)
-
-
-def _placeholder(size: tuple) -> QPixmap:
-    if size not in _placeholder_cache:
-        px = QPixmap(size[0], size[1])
-        px.fill(QColor(20, 20, 24))
-        p = QPainter(px)
-        p.setPen(QColor(39, 39, 42))
-        p.drawRect(0, 0, size[0]-1, size[1]-1)
-        p.setPen(QColor(96, 165, 250))
-        p.setFont(__import__("PySide6.QtGui", fromlist=["QFont"]).QFont("Space Mono", 16))
-        p.drawText(px.rect(), Qt.AlignmentFlag.AlignCenter, "?")
-        p.end()
-        _placeholder_cache[size] = px
-    return _placeholder_cache[size]
+    return None

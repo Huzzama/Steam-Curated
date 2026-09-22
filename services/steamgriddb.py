@@ -1,14 +1,16 @@
+import logging
 import requests
 from pathlib import Path
 from typing import Optional
 from config import STEAMGRIDDB_BASE, COVERS_DIR
+from services._http import new_session, SESSION as _PLAIN
+
+log = logging.getLogger("curator.steamgriddb")
 
 
 def _make_session(api_key: str) -> requests.Session:
-    """Always create a fresh session with the given key — no global cache."""
-    s = requests.Session()
-    s.headers.update({"Authorization": f"Bearer {api_key}"})
-    return s
+    """Session with the user's key (certifi-verified, default timeout)."""
+    return new_session(Authorization=f"Bearer {api_key}")
 
 
 def get_game_id(app_id: str, api_key: str) -> Optional[str]:
@@ -56,7 +58,7 @@ def download_cover(app_id: str, api_key: str, game_name: str = "") -> Optional[s
     Returns the local file path, or None on complete failure.
     """
     # Always try Steam CDN fallback first if no API key
-    if not api_key or api_key.strip() == "YOUR_STEAMGRIDDB_API_KEY":
+    if not api_key or not api_key.strip():
         return _fallback_steam_header(app_id)
 
     try:
@@ -86,7 +88,7 @@ def download_cover(app_id: str, api_key: str, game_name: str = "") -> Optional[s
         image_url = best["url"]
 
         save_path = COVERS_DIR / f"{app_id}.jpg"
-        img_resp = requests.get(image_url, timeout=15)
+        img_resp = _PLAIN.get(image_url, timeout=15)
         img_resp.raise_for_status()
         save_path.write_bytes(img_resp.content)
         return str(save_path)
@@ -108,7 +110,7 @@ def _fallback_steam_header(app_id: str) -> Optional[str]:
     save_path = COVERS_DIR / f"{app_id}.jpg"
     for url in urls_to_try:
         try:
-            resp = requests.get(url, timeout=10)
+            resp = _PLAIN.get(url, timeout=10)
             if resp.status_code == 200 and len(resp.content) > 1000:
                 save_path.write_bytes(resp.content)
                 return str(save_path)
@@ -202,7 +204,7 @@ def download_all_missing(
             try:
                 downloaded_count = repo.update_many(to_save)
             except Exception as e:
-                print(f"[SteamGridDB] download_all_missing: update_many failed: {e}")
+                log.error("download_all_missing: update_many failed: %s", e)
                 with lock:
                     failed_c[0] += len(to_save)
                 downloaded_count = 0
@@ -210,4 +212,4 @@ def download_all_missing(
         if on_done:
             on_done(downloaded_count, failed_c[0])
 
-    threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=_run, daemon=True).start()

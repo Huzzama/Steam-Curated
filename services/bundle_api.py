@@ -39,25 +39,35 @@ import re
 import time
 from typing import Optional
 
-import requests
-import certifi
+import logging
+import threading
 
-_SESSION = requests.Session()
-_SESSION.headers.update({"Accept-Language": "en-US,en;q=0.9"})
-_SESSION.verify = certifi.where()
+import requests
+
+from services._http import new_session
+
+log = logging.getLogger("curator.bundles")
+
+_SESSION = new_session()
+# Age-gated store pages (GTA, Cyberpunk, Metro…) return the agecheck page —
+# with no bundle links at all — unless these cookies are present.
+_SESSION.cookies.update({"birthtime": "470682001", "mature_content": "1",
+                         "lastagecheckage": "1-January-1985"})
 
 _cache: dict[str, Optional[dict]] = {}
 
 _last_fetch: float = 0.0
 _FETCH_DELAY = 0.4   # seconds between Steam API requests
+_throttle_lock = threading.Lock()   # two worker threads share this throttle
 
 
 def _throttle():
     global _last_fetch
-    elapsed = time.time() - _last_fetch
-    if elapsed < _FETCH_DELAY:
-        time.sleep(_FETCH_DELAY - elapsed)
-    _last_fetch = time.time()
+    with _throttle_lock:
+        elapsed = time.time() - _last_fetch
+        if elapsed < _FETCH_DELAY:
+            time.sleep(_FETCH_DELAY - elapsed)
+        _last_fetch = time.time()
 
 
 # ── Packages ──────────────────────────────────────────────────────────────────
@@ -107,7 +117,7 @@ def get_package_details(pkg_id: str, country: str = "mx") -> Optional[dict]:
         return result
 
     except Exception as e:
-        print(f"[BundleAPI] package {pkg_id} error: {e}")
+        log.debug(f"[BundleAPI] package {pkg_id} error: {e}")
         _cache[cache_key] = None
         return None
 
@@ -170,16 +180,15 @@ def get_editions_for_app(app_id: str, country: str = "mx") -> list[dict]:
     for pkg_group in data.get("package_groups", []):
         for sub in pkg_group.get("subs", []):
             raw_text = sub.get("option_text", "").strip()
-            print(f"[Editions] raw option_text: {raw_text!r}")
-
+            log.debug(f"[Editions] raw option_text: {raw_text!r}")
             if not raw_text or raw_text.lower() in ("standard", "base game"):
-                print(f"[Editions] skipped ghost row (trivial text): {raw_text!r}")
+                log.debug(f"[Editions] skipped ghost row (trivial text): {raw_text!r}")
                 continue
 
             try:
                 cur = int(sub.get("price_in_cents_with_discount", 0)) / 100
             except (ValueError, TypeError):
-                print(f"[Editions] skipped (bad price): {raw_text!r}")
+                log.debug(f"[Editions] skipped (bad price): {raw_text!r}")
                 continue
 
             try:
@@ -191,15 +200,14 @@ def get_editions_for_app(app_id: str, country: str = "mx") -> list[dict]:
 
             base_p = round(cur / (1 - disc / 100), 2) if disc > 0 else cur
             name   = _clean_edition_name(raw_text, data.get("name", ""))
-            print(f"[Editions] cleaned name: {name!r}")
-
+            log.debug(f"[Editions] cleaned name: {name!r}")
             if not _is_valid_edition_name(name):
-                print(f"[Editions] skipped ghost row (invalid name): {name!r}")
+                log.debug(f"[Editions] skipped ghost row (invalid name): {name!r}")
                 continue
 
             key = _normalize_name(name)
             if not key or key in seen_keys:
-                print(f"[Editions] skipped duplicate: {name!r} (key={key!r})")
+                log.debug(f"[Editions] skipped duplicate: {name!r} (key={key!r})")
                 continue
             seen_keys.add(key)
 
@@ -341,11 +349,9 @@ def scrape_bundle_ids_from_app_page(app_id: str, country: str = "mx") -> set[str
         for match in re.finditer(r"/bundle/(\d+)(?:/|\b)", html):
             bundle_ids.add(match.group(1))
 
-        print(f"[Bundles] scraped from app page (app_id={app_id}): {bundle_ids}")
-
+        log.debug(f"[Bundles] scraped from app page (app_id={app_id}): {bundle_ids}")
     except Exception as e:
-        print(f"[Bundles] app page scrape failed for app_id={app_id}: {e}")
-
+        log.debug(f"[Bundles] app page scrape failed for app_id={app_id}: {e}")
     return bundle_ids
 
 
@@ -388,7 +394,7 @@ def search_store_bundles_for_app(
     results: list[dict] = []
 
     for term in search_terms:
-        print(f"[Bundles] search term: {term!r}")
+        log.debug(f"[Bundles] search term: {term!r}")
         try:
             _throttle()
             r = _SESSION.get(
@@ -405,12 +411,11 @@ def search_store_bundles_for_app(
             r.raise_for_status()
             items = r.json().get("items", [])
         except Exception as e:
-            print(f"[Bundles] search error for {term!r}: {e}")
+            log.debug(f"[Bundles] search error for {term!r}: {e}")
             continue
 
         for item in items:
-            print(f"[Bundles] search item: {item.get('name')!r}  id={item.get('id')!r}")
-
+            log.debug(f"[Bundles] search item: {item.get('name')!r}  id={item.get('id')!r}")
             bundle_id = str(item.get("id", "")).strip()
             if not bundle_id:
                 logo = item.get("logo", "") or item.get("streamingURL", "")
@@ -424,11 +429,10 @@ def search_store_bundles_for_app(
 
             bundle = resolve_bundle_details(bundle_id, app_id, country)
             if bundle:
-                print(f"[Bundles] accepted: {bundle['name']!r}  ({bundle['app_count']} apps)")
+                log.debug(f"[Bundles] accepted: {bundle['name']!r}  ({bundle['app_count']} apps)")
                 results.append(bundle)
             else:
-                print(f"[Bundles] rejected (app not in bundle or resolve failed): bundle_id={bundle_id}")
-
+                log.debug(f"[Bundles] rejected (app not in bundle or resolve failed): bundle_id={bundle_id}")
     return results
 
 
@@ -515,15 +519,18 @@ def resolve_bundle_details(
 
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else "?"
-        print(f"[Bundles] ajaxresolvebundles {status} for bundle_id={bundle_id} — trying HTML fallback")
+        log.debug(f"[Bundles] ajaxresolvebundles {status} for bundle_id={bundle_id} — trying HTML fallback")
         ajax_failed = True
     except Exception as e:
-        print(f"[BundleAPI] ajaxresolvebundles error for bundle_id={bundle_id}: {e} — trying HTML fallback")
+        log.debug(f"[BundleAPI] ajaxresolvebundles error for bundle_id={bundle_id}: {e} — trying HTML fallback")
         ajax_failed = True
 
     # ── Source B: HTML bundle page fallback ───────────────────────────────────
     result = resolve_bundle_details_from_html(bundle_id, target_app_id, country)
-    _cache[cache_key] = result  # cache result OR None
+    # Only cache a resolved bundle. None here can mean "this game isn't in it",
+    # which must not poison the cache for other games that ARE in it.
+    if result is not None:
+        _cache[cache_key] = result
     return result
 
 
@@ -555,8 +562,7 @@ def resolve_bundle_details_from_html(
       • fewer than 2 apps found (not a real multi-game bundle)
     """
     url = f"https://store.steampowered.com/bundle/{bundle_id}/"
-    print(f"[BundlesHTML] fetching bundle page: {url}")
-
+    log.debug(f"[BundlesHTML] fetching bundle page: {url}")
     try:
         _throttle()
         r = _SESSION.get(
@@ -567,24 +573,22 @@ def resolve_bundle_details_from_html(
         r.raise_for_status()
         html_text = r.text or ""
     except Exception as e:
-        print(f"[BundlesHTML] fetch failed for bundle_id={bundle_id}: {e}")
+        log.debug(f"[BundlesHTML] fetch failed for bundle_id={bundle_id}: {e}")
         return None
 
     # ── Extract name ──────────────────────────────────────────────────────────
     bundle_name = _extract_bundle_name_from_html(html_text, bundle_id)
-    print(f"[BundlesHTML] extracted name: {bundle_name!r}")
-
+    log.debug(f"[BundlesHTML] extracted name: {bundle_name!r}")
     # ── Extract app IDs ───────────────────────────────────────────────────────
     raw_app_ids = _extract_appids_from_bundle_html(html_text)
-    print(f"[BundlesHTML] extracted appids: {sorted(raw_app_ids)}")
-
+    log.debug(f"[BundlesHTML] extracted appids: {sorted(raw_app_ids)}")
     if not raw_app_ids or str(target_app_id) not in raw_app_ids:
-        print(f"[BundlesHTML] rejected bundle_id={bundle_id}: "
+        log.debug(f"[BundlesHTML] rejected bundle_id={bundle_id}: "
               f"target_app_id={target_app_id} not in appids={sorted(raw_app_ids)}")
         return None
 
     if len(raw_app_ids) < 2:
-        print(f"[BundlesHTML] rejected bundle_id={bundle_id}: only {len(raw_app_ids)} app(s) found")
+        log.debug(f"[BundlesHTML] rejected bundle_id={bundle_id}: only {len(raw_app_ids)} app(s) found")
         return None
 
     apps = [{"id": aid, "name": f"App {aid}"} for aid in sorted(raw_app_ids)]
@@ -606,7 +610,7 @@ def resolve_bundle_details_from_html(
         "price_unavailable": price is None,
         "source":            "bundle_html",
     }
-    print(f"[BundlesHTML] accepted: {bundle_name!r}  "
+    log.debug(f"[BundlesHTML] accepted: {bundle_name!r}  "
           f"app_count={len(apps)}  price={price}  base_price={base_price}  {currency}")
     return result
 
@@ -676,9 +680,12 @@ def _extract_appids_from_bundle_html(html_text: str) -> set[str]:
         for n in re.findall(r'\d+', val):
             ids.add(n)
 
-    # 3: "appid": N  in embedded JS/JSON objects
-    for m in re.finditer(r'"appid"\s*:\s*(\d+)', html_text):
-        ids.add(m.group(1))
+    # 3: "appid": N in embedded JSON — only when the card attributes yielded
+    #    nothing. Page-wide JSON blobs include recommendations / "more from
+    #    this developer" widgets and inflated the bundle's app list.
+    if not ids:
+        for m in re.finditer(r'"appid"\s*:\s*(\d+)', html_text):
+            ids.add(m.group(1))
 
     # 4: /app/N/ links — only if nothing found above (avoids nav noise)
     if not ids:
@@ -909,12 +916,11 @@ def get_bundles_enriched(app_id: str, country: str = "mx") -> list[dict]:
             country=country,
         )
         if bundle:
-            print(f"[Bundles] accepted from app page scrape: {bundle['name']!r}")
+            log.debug(f"[Bundles] accepted from app page scrape: {bundle['name']!r}")
             bundles.append(bundle)
             existing_bundle_ids.add(bundle_id)
         else:
-            print(f"[Bundles] rejected scraped bundle_id={bundle_id}")
-
+            log.debug(f"[Bundles] rejected scraped bundle_id={bundle_id}")
     # ── Enrich with wishlist / purchased data ─────────────────────────────────
     enriched = [enrich_bundle_with_wishlist(b) for b in bundles]
 
@@ -946,4 +952,4 @@ def get_bundles_enriched(app_id: str, country: str = "mx") -> list[dict]:
         )
     )
 
-    return unique
+    return unique

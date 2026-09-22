@@ -3,10 +3,17 @@ Purchase history repository.
 Stores in purchases.json — separate from wishlist.json.
 """
 import json
+import logging
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 from data.models import Purchase
+
+log = logging.getLogger("curator.purchases")
+_lock = threading.RLock()          # writes from the UI thread + reads from bundle workers
+
+
 def _get_db_path():
     from config import BASE_DIR
     return BASE_DIR / "purchases.json"
@@ -15,21 +22,33 @@ _cache: Optional[list[dict]] = None
 
 def _load() -> list[dict]:
     global _cache
-    if _cache is not None:
+    with _lock:
+        if _cache is not None:
+            return _cache
+        path = _get_db_path()
+        if not path.exists():
+            _cache = []
+            return _cache
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            _cache = data if isinstance(data, list) else []
+        except Exception as e:  # noqa: BLE001
+            log.error("purchases.json unreadable (%s) — using backup", e)
+            try:
+                with open(path.with_suffix(".json.bak"), encoding="utf-8") as f:
+                    _cache = json.load(f)
+            except Exception:  # noqa: BLE001
+                _cache = []
         return _cache
-    if not _get_db_path().exists():
-        _cache = []
-        return _cache
-    with open(_get_db_path(), encoding="utf-8") as f:
-        _cache = json.load(f)
-    return _cache
 
 
 def _save(data: list[dict]):
     global _cache
-    _cache = data
-    with open(_get_db_path(), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    with _lock:
+        _cache = data
+        from data.repository import _write_json
+        _write_json(_get_db_path(), data)
 
 
 def get_all() -> list[Purchase]:
@@ -81,4 +100,4 @@ def total_saved() -> float:
 
 def invalidate():
     global _cache
-    _cache = None
+    _cache = None

@@ -1,38 +1,35 @@
 """
-Fetch and import a user's Steam wishlist via the Steam Web API.
+Fetch and import the user's Steam wishlist.
 
-Requires:
-- SteamID64 (obtained via OpenID login)
-- Steam Web API key (from steamcommunity.com/dev/apikey)
+The wishlist comes from the PimpMySteam backend (GET /steam/me/wishlist) for
+the Steam account linked to the connected PimpMySteam user — the app never
+sees a Steam Web API key. Store details are then fetched per game from the
+public Steam store API.
+
+`steam_id64` / `api_key` parameters are kept for call-site compatibility and
+ignored.
 """
-import requests
+import logging
 from typing import Optional
 from data.models import Game, PriceInfo
 from datetime import datetime
 
-_SESSION = requests.Session()
-_SESSION.headers.update({"User-Agent": "SteamLibraryCurator/1.0"})
+log = logging.getLogger("curator.wishlist")
 
 
-def fetch_wishlist(steam_id64: str, api_key: str, country: str = "mx") -> list[dict]:
+def fetch_wishlist(steam_id64: str = None, api_key: str = None, country: str = "mx") -> list[dict]:
     """
-    Fetch the user's Steam wishlist.
-    Returns a list of raw game dicts from the API.
+    The user's Steam wishlist via the backend.
+    Returns [{"appid", "priority", "date_added", "name"}, …].
+    Raises services._http.ApiError / Unreachable.
     """
-    url  = "https://api.steampowered.com/IWishlistService/GetWishlist/v1/"
-    resp = _SESSION.get(url, params={
-        "key":      api_key,
-        "steamid":  steam_id64,
-    }, timeout=15)
-    resp.raise_for_status()
-    data  = resp.json()
-    items = data.get("response", {}).get("items", [])
-    return items
+    from services.steamkustom_auth import get_wishlist
+    return get_wishlist()
 
 
 def fetch_wishlist_with_details(
-    steam_id64: str,
-    api_key: str,
+    steam_id64: str = None,
+    api_key: str = None,
     country: str = "mx",
     on_progress: callable = None,
 ) -> list[dict]:
@@ -56,7 +53,7 @@ def fetch_wishlist_with_details(
             # count didn't match the Steam wishlist count. Still include
             # a placeholder entry so it shows up (with a generic name)
             # instead of disappearing, and log it so it's traceable.
-            print(f"[Wishlist] Item {i+1}/{total} has no appid — raw: {item}")
+            log.warning("item %d/%d has no appid: %s", i + 1, total, item)
             enriched.append({
                 "app_id":   f"unknown_{i}",
                 "name":     item.get("name") or f"Unknown wishlist item #{i+1}",
@@ -106,22 +103,27 @@ def fetch_wishlist_with_details(
 
 def map_steam_priority(steam_priority: int) -> str:
     """
-    Map Steam's numeric wishlist position to our S/A/B/C system.
-    Steam priority is 0-based position in the list (0 = most wanted).
+    Map Steam's wishlist priority to our S/A/B/C system.
+
+    IWishlistService returns the user's manual ordering as `priority`
+    (1 = top of the list); games the user never ordered come back as 0.
+    Those must NOT become "S" — they land in "B" (the neutral tier).
     """
-    if steam_priority <= 2:
+    if steam_priority <= 0:
+        return "B"
+    if steam_priority <= 3:
         return "S"
-    elif steam_priority <= 8:
+    elif steam_priority <= 10:
         return "A"
-    elif steam_priority <= 20:
+    elif steam_priority <= 25:
         return "B"
     else:
         return "C"
 
 
 def import_wishlist(
-    steam_id64: str,
-    api_key: str,
+    steam_id64: str = None,
+    api_key: str = None,
     country: str = "mx",
     on_progress: callable = None,
     skip_existing: bool = True,
@@ -147,12 +149,13 @@ def import_wishlist(
     skipped  = 0
     errors   = 0
     dropped  = 0   # items with no usable app_id — should be 0 after the fix above
+    new_games: list[Game] = []
 
     for item in items:
         app_id = item.get("app_id", "")
         if not app_id:
             dropped += 1
-            print(f"[Wishlist] Dropping item with no app_id: {item}")
+            log.warning("dropping item with no app_id: %s", item)
             continue
 
         if skip_existing and app_id in existing_ids:
@@ -178,11 +181,15 @@ def import_wishlist(
                 price_history=None,
                 notes="Imported from Steam",
             )
-            repo.add(game)
+            new_games.append(game)
             added += 1
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             errors += 1
-            print(f"[Wishlist] Failed to add {item.get('name', app_id)}: {e}")
+            log.warning("failed to build %s: %s", item.get('name', app_id), e)
+
+    # one disk write for the whole import
+    if new_games:
+        repo.add_many(new_games)
 
     total_steam = len(items)
     accounted   = added + skipped + errors + dropped
@@ -190,8 +197,8 @@ def import_wishlist(
         # This should never happen after the fix above, but log loudly if
         # it ever does again so a future "62 vs 65" report is traceable
         # instead of a mystery.
-        print(f"[Wishlist] WARNING: accounted {accounted} != Steam total {total_steam} "
-              f"(added={added}, skipped={skipped}, errors={errors}, dropped={dropped})")
+        log.warning("accounted %d != Steam total %d (added=%d skipped=%d errors=%d dropped=%d)",
+                    accounted, total_steam, added, skipped, errors, dropped)
 
     return {
         "added":   added,
@@ -202,23 +209,7 @@ def import_wishlist(
     }
 
 
-def get_player_summary(steam_id64: str, api_key: str) -> Optional[dict]:
-    """Fetch basic profile info: name, avatar, profile URL."""
-    try:
-        resp = _SESSION.get(
-            "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/",
-            params={"key": api_key, "steamids": steam_id64},
-            timeout=10,
-        )
-        players = resp.json().get("response", {}).get("players", [])
-        if players:
-            p = players[0]
-            return {
-                "name":       p.get("personaname", ""),
-                "avatar_url": p.get("avatarmedium", ""),
-                "profile_url":p.get("profileurl", ""),
-                "steam_id":   steam_id64,
-            }
-    except Exception:
-        pass
-    return None
+def get_player_summary(steam_id64: str = None, api_key: str = None) -> Optional[dict]:
+    """Basic profile info (name, avatar, profile URL) via the backend."""
+    from services.steamkustom_auth import get_player_summary as _summary
+    return _summary()

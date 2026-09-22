@@ -14,6 +14,30 @@ def load_locale(locale: str) -> None:
     with open(path, encoding="utf-8") as f:
         _translations = json.load(f)
     _current_locale = locale
+    _apply_overlays(locale)
+
+
+def _deep_merge(dst: dict, src: dict) -> None:
+    for k, v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            _deep_merge(dst[k], v)
+        else:
+            dst[k] = v
+
+
+def _apply_overlays(locale: str) -> None:
+    """Dev aid: locales/overlay/<name>.<locale>.json files are merged on top of
+    the main file so several people can add keys without editing the same
+    file. tools/merge_locales.py folds them into the real files."""
+    folder = LOCALES_DIR / "overlay"
+    if not folder.is_dir():
+        return
+    for f in sorted(folder.glob(f"*.{locale}.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                _deep_merge(_translations, json.load(fh))
+        except (OSError, ValueError):
+            continue
 
 
 def t(key: str, **kwargs) -> str:

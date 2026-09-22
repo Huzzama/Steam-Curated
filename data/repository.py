@@ -4,12 +4,16 @@ Reads JSON once, keeps everything in RAM.
 Writes are immediate but reads never hit disk twice.
 """
 import json
+import logging
+import os
 import threading
 from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
 from data.models import Game, PriceInfo, PriceHistory
 from data.status import normalize_status
+
+log = logging.getLogger("curator.repo")
 
 # Every write (add/update/delete/update_many) goes through this lock.
 # Without it, concurrent background threads (bulk price refresh, bulk
@@ -31,17 +35,61 @@ _id_index: Optional[dict] = None     # app_id -> dict, O(1) lookup
 _set_index: Optional[set] = None     # set of app_ids for O(1) membership
 
 
+def _write_json(path: Path, data) -> None:
+    """Atomic write: temp file + os.replace, keeping the previous file as .bak.
+    A crash/power loss mid-write used to leave a truncated wishlist.json that
+    made the app unable to start."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    if path.exists():
+        try:
+            os.replace(path, path.with_suffix(path.suffix + ".bak"))
+        except OSError:
+            pass
+    os.replace(tmp, path)
+
+
 def _load() -> list[dict]:
     global _cache, _id_index, _set_index
     if _cache is not None:
         return _cache
-    if not _get_db_path().exists():
+    with _load_lock:
+        if _cache is not None:          # another thread loaded it meanwhile
+            return _cache
+        return _load_unlocked()
+
+
+_load_lock = threading.Lock()
+
+
+def _load_unlocked() -> list[dict]:
+    global _cache, _id_index, _set_index
+    path = _get_db_path()
+    if not path.exists():
         _cache = []
         _id_index  = {}
         _set_index = set()
         return _cache
-    with open(_get_db_path(), encoding="utf-8") as f:
-        _cache = json.load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            _cache = json.load(f)
+        if not isinstance(_cache, list):
+            raise ValueError("wishlist.json is not a list")
+    except Exception as e:  # noqa: BLE001
+        # Corrupt file: fall back to the .bak the atomic writer keeps, and
+        # never lose the broken file (renamed, not deleted).
+        log.error("wishlist.json unreadable (%s) — trying backup", e)
+        bak = path.with_suffix(path.suffix + ".bak")
+        try:
+            os.replace(path, path.with_suffix(".corrupt.json"))
+        except OSError:
+            pass
+        try:
+            with open(bak, encoding="utf-8") as f:
+                _cache = json.load(f)
+        except Exception:  # noqa: BLE001
+            _cache = []
 
     # One-time migration: fix any game whose status was persisted as a
     # translated i18n string by an older app version (e.g. "Comprado",
@@ -57,9 +105,8 @@ def _load() -> list[dict]:
             d["status"] = fixed
             _migrated = True
     if _migrated:
-        with open(_get_db_path(), "w", encoding="utf-8") as f:
-            json.dump(_cache, f, ensure_ascii=False, indent=2)
-        print("[Repository] Migrated legacy/translated game status values to canonical form")
+        _write_json(path, _cache)
+        log.info("migrated legacy/translated game status values to canonical form")
 
     # Build O(1) lookup indexes
     _id_index  = {str(d["app_id"]): d for d in _cache}
@@ -72,8 +119,7 @@ def _save(data: list[dict]) -> None:
     _cache     = data
     _id_index  = {str(d["app_id"]): d for d in data}
     _set_index = set(_id_index.keys())
-    with open(_get_db_path(), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _write_json(_get_db_path(), data)
 
 
 def _invalidate():
@@ -142,13 +188,6 @@ def get_by_id(game_id: int) -> Optional[Game]:
     return None
 
 
-def get_by_app_id(app_id: str) -> Optional[Game]:
-    for d in _load():
-        if d["app_id"] == app_id:
-            return _to_game(d)
-    return None
-
-
 def add(game: Game) -> Game:
     with _write_lock:
         db      = _load()
@@ -157,6 +196,21 @@ def add(game: Game) -> Game:
         db.append(_from_game(game))
         _save(db)
         return game
+
+
+def add_many(games: list[Game]) -> list[Game]:
+    """Add several games with ONE disk write (wishlist import used to rewrite
+    the whole file once per game — O(N²) bytes for a 600-game wishlist)."""
+    with _write_lock:
+        db      = _load()
+        next_id = max((d["id"] for d in db), default=0) + 1
+        for g in games:
+            g.id = next_id
+            next_id += 1
+            db.append(_from_game(g))
+        if games:
+            _save(db)
+        return games
 
 
 def update(game: Game) -> bool:
@@ -219,4 +273,4 @@ def get_recent(limit: int = 20) -> list[Game]:
 
 
 def get_by_priority(priority: str) -> list[Game]:
-    return [g for g in get_all() if g.priority == priority]
+    return [g for g in get_all() if g.priority == priority]

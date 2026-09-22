@@ -48,10 +48,7 @@ LOCALES_DIR = BUNDLE_DIR / "locales"
 COVERS_DIR.mkdir(parents=True, exist_ok=True)
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
-STEAMGRIDDB_API_KEY = "YOUR_STEAMGRIDDB_API_KEY"
-STEAM_API_BASE   = "https://store.steampowered.com/api"
 STEAMGRIDDB_BASE = "https://www.steamgriddb.com/api/v2"
-STEAMDB_BASE     = "https://steamdb.info/app"
 
 APP_NAME        = "Steam Curator"
 WINDOW_SIZE     = "1200x720"
@@ -102,9 +99,6 @@ STEAM_SALE_EVENTS = [
     {"key": "summer_sale_2027", "server_img": "summer_sale",    "start": "2027-06-24", "end": "2027-07-08",
      "confirmed": False, "color_top": "#1A6B9A", "color_bot": "#0D3550", "emoji": "☀️"},
 ]
-
-SHEET_WISHLIST  = "Wishlist"
-SHEET_DASHBOARD = "Dashboard"
 
 LOCALES = {
     "es": "Español",

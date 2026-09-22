@@ -19,6 +19,7 @@ class PriceHistory:
     all_time_discount: int
     last_sale_price: Optional[float]
     last_sale_date: Optional[str]
+    source: str = ""          # "itad" | "observed" | "" (unknown / legacy)
 
 
 @dataclass
@@ -86,4 +87,4 @@ class SteamSaleEvent:
     name: str
     start_date: str
     end_date: str
-    is_confirmed: bool
+    is_confirmed: bool

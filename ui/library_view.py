@@ -1,52 +1,47 @@
-import hashlib
-import json
-import threading
-from typing import Optional
+"""
+Library — your Steam collection (owned games, playtime, recent activity)
+plus what the curator tracks (wishlist, purchases, play status).
 
-from PySide6.QtWidgets import (
-    QFrame, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QScrollArea, QPushButton, QSizePolicy,
-)
-from PySide6.QtCore import Qt, Signal, QObject
-from PySide6.QtGui import QFont
+    LibraryView(parent)
+    view.refresh(force=False)     force=True drops the Steam API cache first
+    view.retranslate()            update visible strings in place
 
-import matplotlib
-matplotlib.use("QtAgg")
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+Steam stats come from services.library_api.get_library_stats() through
+run_async. While loading the section shows Skeleton tiles; a LibraryError
+becomes an EmptyState with the user-facing reason and an "Open settings"
+button. Curator numbers come straight from the repositories (cached, cheap).
 
-from config import COLORS
-import data.repository as repo
-import data.purchase_repository as purchases
-from data.status import STATUS_PURCHASED, normalize_status
+This module also hosts translate_genre / translate_genres, which other views
+import.
+"""
+from __future__ import annotations
+
+from typing import Callable, Optional
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QComboBox, QGridLayout, QProgressBar, QWidget
+
 import i18n
+import data.purchase_repository as purchases
+import data.repository as repo
+from data.models import Game
+from data.status import STATUS_ARCHIVED, STATUS_PURCHASED, STATUS_WISHLIST, normalize_status
+from ui.animations import clear_layout
+from ui.async_bridge import run_async
+from ui.components import (Button, Card, EmptyState, ListRow, Pill, PriorityBadge, SectionHeader,
+                           Skeleton, StatCard, SubHeader, hbox, label, scroll_area, vbox)
+from ui.format import money, pct
+from ui.theme import C, SP
 
-# ── Colour aliases (all resolved from the single COLORS dict) ─────────────────
-# Never define local BG / CARD_BG — always go through COLORS so the whole UI
-# shares the same palette and there are no "extra shades of black".
-BLUE   = COLORS["blue"]
-GREEN  = COLORS["green"]
-GOLD   = COLORS["gold"]
-PINK   = COLORS.get("pink",   "#f472b6")
-PURPLE = COLORS.get("purple", "#a78bfa")
-ORANGE = COLORS.get("orange", "#fb923c")
-CYAN   = COLORS.get("cyan",   "#22d3ee")
-DIM    = COLORS["text_dim"]
-TEXT   = COLORS["text"]
-
-PLAY_STATUS_OPTIONS = [
-    ("playing",   i18n.t("play_status.playing"),   BLUE),
-    ("completed", i18n.t("play_status.completed"), GREEN),
-    ("on_hold",   i18n.t("play_status.on_hold"),   GOLD),
-    ("abandoned", i18n.t("play_status.abandoned"), PINK),
-]
-PLAY_STATUS_ICON = {
-    "playing":   "▶",
-    "completed": "✓",
-    "on_hold":   "⏸",
-    "abandoned": "✕",
+PLAY_STATUSES = ["", "playing", "completed", "on_hold", "abandoned"]
+PLAY_STATUS_STYLE = {          # key -> (icon, StatCard tone)
+    "playing":   ("play", "accent"),
+    "completed": ("check", "green"),
+    "on_hold":   ("pause", "gold"),
+    "abandoned": ("x", "pink"),
 }
-
+_TOP_N = 10
+_BAR_WIDTH = 110
 
 
 # ── Genre translation ─────────────────────────────────────────────────────────
@@ -110,675 +105,369 @@ def translate_genres(genres_str: str, sep: str = ", ") -> str:
     return sep.join(p for p in parts if p)
 
 
-class _Sig(QObject):
-    steam_ready = Signal(object)   # dict | None
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def _hours(h: float) -> str:
+    return i18n.t("library.hours", h=f"{h:,.0f}" if h >= 10 else f"{h:.1f}")
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _lbl(text: str, size: int = 11, bold: bool = False,
-         color: str = None, wrap: bool = False) -> QLabel:
-    """
-    Label with explicit color + background-color:transparent.
-    The transparent background-color declaration is critical: without it a
-    QLabel that lives inside a QFrame with a stylesheet can paint an opaque
-    rectangle inherited from the parent, causing the 'black box' artefact.
-    """
-    l = QLabel(text)
-    f = QFont("Space Mono", size)
-    if bold:
-        f.setBold(True)
-    l.setFont(f)
-    l.setStyleSheet(
-        f"color:{color or TEXT}; background-color:transparent;"
-    )
-    l.setAutoFillBackground(False)
-    if wrap:
-        l.setWordWrap(True)
-    return l
+def _stat_grid(parent: QWidget) -> QGridLayout:
+    g = QGridLayout(parent)
+    g.setContentsMargins(0, 0, 0, 0)
+    g.setSpacing(SP["md"])
+    for c in range(4):
+        g.setColumnStretch(c, 1)
+    return g
 
 
-def _transparent_widget(object_name: str) -> QWidget:
-    """QWidget that is explicitly transparent — safe to use as a row wrapper."""
-    w = QWidget()
-    w.setObjectName(object_name)
-    w.setStyleSheet(f"QWidget#{object_name} {{ background: transparent; }}")
-    w.setAutoFillBackground(False)
-    return w
-
-
-def _section_header(text: str) -> QWidget:
-    """Section separator with label + horizontal rule."""
-    w = _transparent_widget("SectionHeader")
-    wl = QHBoxLayout(w)
-    wl.setContentsMargins(0, 8, 0, 2)
-    wl.setSpacing(8)
-    wl.addWidget(_lbl(text, 12, bold=True, color=DIM))
-    line = QFrame()
-    line.setObjectName("SectionLine")
-    line.setFrameShape(QFrame.Shape.HLine)
-    line.setStyleSheet(f"QFrame#SectionLine {{ color:{COLORS['border']}; }}")
-    wl.addWidget(line, 1)
-    return w
-
-
-def _stat_card(lay, label: str, value: str,
-               color: str = None, sub: str = None) -> QFrame:
-    """
-    Bordered stat card.
-    Uses QFrame#StatCard_<label_hash> so the selector is always specific and
-    never bleeds into child widgets.
-    Internal labels inherit background-color:transparent from _lbl().
-    """
-    color = color or BLUE
-    # Unique object name avoids the catch-all QFrame { ... } problem
-    uid = abs(hash(label + value)) % 100000
-    obj = f"StatCard_{uid}"
-    f = QFrame()
-    f.setObjectName(obj)
-    f.setStyleSheet(f"""
-        QFrame#{obj} {{
-            background:{COLORS['card']};
-            border:1px solid {COLORS['border']};
-            border-left:3px solid {color};
-            border-radius:8px;
-        }}
-    """)
-    fl = QVBoxLayout(f)
-    fl.setContentsMargins(14, 10, 14, 10)
-    fl.setSpacing(2)
-    fl.addWidget(_lbl(label, 9, color=DIM))
-    fl.addWidget(_lbl(value, 18, bold=True, color=color))
-    if sub:
-        fl.addWidget(_lbl(sub, 8, color=DIM))
-    lay.addWidget(f, 1)
-    return f
-
-
-def _embed_chart(parent_layout, fig, center: bool = False,
-                 min_height: int = 240) -> FigureCanvasQTAgg:
-    """
-    Attach a Matplotlib figure to *parent_layout* with all colours unified.
-
-    Rules enforced here:
-      • fig.patch  → COLORS["bg"]        (the outer figure background)
-      • ax.patch   → COLORS["bg"]        (the axes background)
-      • canvas QSS → background-color: COLORS["bg"]
-    This means every layer uses the same value, so no colour mismatch appears.
-
-    If the chart lives *inside* a card (COLORS["card"]), call _embed_chart_in_card
-    instead which uses COLORS["card"] for all three layers.
-    """
-    _apply_chart_colors(fig, COLORS["bg"])
-    canvas = _make_canvas(fig, COLORS["bg"], min_height)
-    if center:
-        wrapper = _transparent_widget("ChartWrapper")
-        wl = QHBoxLayout(wrapper)
-        wl.setContentsMargins(0, 0, 0, 0)
-        wl.addStretch()
-        wl.addWidget(canvas)
-        wl.addStretch()
-        parent_layout.addWidget(wrapper)
+def _set(tile: StatCard, value, fmt=None) -> None:
+    """StatCard.set_value, but a zero renders immediately (0 -> 0 never animates)."""
+    if isinstance(value, (int, float)) and value == 0:
+        tile.set_value(fmt(0) if fmt else "0", animate=False)
     else:
-        parent_layout.addWidget(canvas)
-    plt.close(fig)
-    return canvas
+        tile.set_value(value, fmt=fmt)
 
 
-def _embed_chart_in_card(card: QFrame, fig,
-                          min_height: int = 220) -> FigureCanvasQTAgg:
-    """
-    Same as _embed_chart but uses COLORS["card"] as the uniform background,
-    matching the card that contains it.
-    """
-    _apply_chart_colors(fig, COLORS["card"])
-    canvas = _make_canvas(fig, COLORS["card"], min_height)
-    card.layout().addWidget(canvas)
-    plt.close(fig)
-    return canvas
+def _skeleton_tile() -> Card:
+    c = Card(padding=SP["lg"], spacing=SP["sm"])
+    c.body.addWidget(Skeleton(90, 10))
+    c.body.addWidget(Skeleton(70, 26))
+    c.body.addWidget(Skeleton(120, 10))
+    return c
 
 
-def _apply_chart_colors(fig, bg_color: str) -> None:
-    """Set fig patch, all ax patches, hide spines — all to the same colour."""
-    fig.patch.set_facecolor(bg_color)
-    fig.patch.set_alpha(1)
-    for ax in fig.axes:
-        ax.set_facecolor(bg_color)
-        ax.patch.set_alpha(1)
-        for spine in ax.spines.values():
-            spine.set_visible(False)
+def _skeleton_row() -> Card:
+    c = Card(padding=SP["md"], spacing=0)
+    row = hbox(spacing=SP["md"])
+    row.addWidget(Skeleton(22, 18))
+    row.addWidget(Skeleton(180, 12))
+    row.addStretch()
+    row.addWidget(Skeleton(60, 12))
+    c.body.addLayout(row)
+    return c
 
 
-def _make_canvas(fig, bg_color: str,
-                 min_height: int) -> FigureCanvasQTAgg:
-    canvas = FigureCanvasQTAgg(fig)
-    canvas.setStyleSheet(
-        f"background-color:{bg_color}; border:none;"
-    )
-    canvas.setAutoFillBackground(False)
-    canvas.setMinimumHeight(min_height)
-    canvas.setSizePolicy(QSizePolicy.Policy.Expanding,
-                         QSizePolicy.Policy.Expanding)
-    return canvas
+# ── view ─────────────────────────────────────────────────────────────────────
 
+class LibraryView(QWidget):
+    """Steam library stats + curator stats + play status of purchased games."""
 
-# ── Main view ─────────────────────────────────────────────────────────────────
-
-class LibraryView(QFrame):
-
-    def __init__(self, parent=None, **kwargs):
+    def __init__(self, parent=None, notify: Optional[Callable] = None,
+                 on_data_changed: Optional[Callable] = None, **_):
         super().__init__(parent)
-        self.setObjectName("LibraryView")
-        # Use COLORS["bg"] — no local BG constant
-        self.setStyleSheet(
-            f"QFrame#LibraryView {{ background:{COLORS['bg']}; }}"
-        )
-        self._last_hash   = None
-        self._steam_stats: Optional[dict] = None
-        self._sig = _Sig()
-        self._sig.steam_ready.connect(self._on_steam_ready)
-        self._build_shell()
+        self._notify_dep = notify
+        self._stats: Optional[dict] = None
+        self._error: Optional[str] = None
+        self._loading = False
+        self._build()
 
-    # ── Shell (built once) ────────────────────────────────────────────────────
+    # ── build ────────────────────────────────────────────────────────────────
 
-    def _build_shell(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+    def _build(self) -> None:
+        root = vbox(self, (SP["xl"], SP["lg"], SP["xl"], SP["xl"]), SP["lg"])
+        self._refresh_btn = Button("", icon="refresh", on_click=self._force_refresh)
+        self._header = SectionHeader("", "", actions=[self._refresh_btn])
+        root.addWidget(self._header)
 
-        # ── Header bar ────────────────────────────────────────────
-        # Use QFrame + QFrame#LibHeader selector (consistent with QFrame type)
-        header = QFrame()
-        header.setObjectName("LibHeader")
-        header.setFixedHeight(52)
-        header.setStyleSheet(
-            f"QFrame#LibHeader {{ background:{COLORS['panel']}; border:none; }}"
-        )
-        hb = QHBoxLayout(header)
-        hb.setContentsMargins(18, 0, 18, 0)
-        hb.addWidget(_lbl("LIBRARY", 16, bold=True, color=BLUE))
-        hb.addWidget(_lbl(i18n.t("library.subtitle"), 10, color=DIM))
-        hb.addStretch()
+        content = QWidget()
+        lay = vbox(content, (0, 0, SP["sm"], 0), SP["sm"])
 
-        self._refresh_btn = QPushButton(i18n.t("library.refresh"))
-        self._refresh_btn.setObjectName("RefreshBtn")
-        self._refresh_btn.setFixedSize(100, 30)
-        self._refresh_btn.setStyleSheet(f"""
-            QPushButton#RefreshBtn {{
-                background:transparent; color:{DIM};
-                border:1px solid {COLORS['border']}; border-radius:6px;
-                font-family:'Space Mono'; font-size:10px;
-            }}
-            QPushButton#RefreshBtn:hover {{
-                background:{COLORS['card_hover']}; color:{TEXT};
-            }}
-        """)
-        self._refresh_btn.clicked.connect(self._force_refresh)
-        hb.addWidget(self._refresh_btn)
-        root.addWidget(header)
+        self._steam_head = SubHeader("")
+        lay.addWidget(self._steam_head)
+        self._steam_box = QWidget()
+        self._steam_lay = vbox(self._steam_box, spacing=SP["md"])
+        lay.addWidget(self._steam_box)
 
-        # ── Scroll area ───────────────────────────────────────────
-        self._content = QWidget()
-        self._content.setObjectName("LibContent")
-        self._content.setStyleSheet(
-            f"QWidget#LibContent {{ background:{COLORS['bg']}; }}"
-        )
-        self._lay = QVBoxLayout(self._content)
-        self._lay.setContentsMargins(20, 20, 20, 20)
-        self._lay.setSpacing(20)
+        lay.addSpacing(SP["md"])
+        self._curator_head = SubHeader("")
+        lay.addWidget(self._curator_head)
+        self._curator_box = QWidget()
+        self._curator_lay = vbox(self._curator_box, spacing=SP["md"])
+        lay.addWidget(self._curator_box)
 
-        scroll = QScrollArea()
-        scroll.setObjectName("LibScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(self._content)
-        scroll.setStyleSheet(f"""
-            QScrollArea#LibScroll {{ border:none; background:{COLORS['bg']}; }}
-            QScrollBar:vertical {{
-                background:{COLORS['bg']}; width:6px; border:none;
-            }}
-            QScrollBar::handle:vertical {{
-                background:{COLORS['border']}; border-radius:3px; min-height:30px;
-            }}
-            QScrollBar::handle:vertical:hover {{ background:{BLUE}; }}
-            QScrollBar::add-line:vertical,
-            QScrollBar::sub-line:vertical {{ height:0; }}
-        """)
-        root.addWidget(scroll, 1)
+        lay.addSpacing(SP["md"])
+        self._status_head = SubHeader("")
+        lay.addWidget(self._status_head)
+        self._status_desc = label("", "muted")
+        lay.addWidget(self._status_desc)
+        self._status_box = QWidget()
+        self._status_lay = vbox(self._status_box, spacing=SP["md"])
+        lay.addWidget(self._status_box)
 
-    # ── Refresh ───────────────────────────────────────────────────────────────
+        lay.addStretch()
+        root.addWidget(scroll_area(content), 1)
+        self.retranslate()
 
-    def refresh(self):
-        self._render_all()
-        self._fetch_steam_stats()
+    # ── shell contract ───────────────────────────────────────────────────────
 
-    def _force_refresh(self):
-        from services.library_api import invalidate_cache
-        invalidate_cache()
-        self._steam_stats = None
-        self._last_hash   = None
-        self._refresh_btn.setText("…")
-        self._refresh_btn.setEnabled(False)
-        self._render_all()
-        self._fetch_steam_stats()
+    def refresh(self, force: bool = False) -> None:
+        """Re-render curator data now and (re)fetch the Steam stats."""
+        if force:
+            from services.library_api import invalidate_cache
+            invalidate_cache()
+            self._stats = None
+        self._render_curator()
+        self._render_status()
+        self._fetch_steam()
 
-    def _fetch_steam_stats(self):
-        def _work():
-            try:
-                from services.library_api import get_library_stats
-                self._sig.steam_ready.emit(get_library_stats())
-            except Exception as e:
-                print(f"[LibraryView] {e}")
-                self._sig.steam_ready.emit(None)
-        threading.Thread(target=_work, daemon=True).start()
+    def retranslate(self) -> None:
+        t = i18n.t
+        self._header.title.setText(t("nav.library"))
+        self._header.subtitle.setText(t("library.subtitle"))
+        self._header.subtitle.setVisible(True)
+        self._refresh_btn.setText(t("library.refresh"))
+        self._steam_head.title.setText(t("library.section_steam"))
+        self._curator_head.title.setText(t("library.section_curator"))
+        self._status_head.title.setText(t("library.section_status"))
+        self._status_desc.setText(t("library.status_desc"))
+        if self._stats is not None or self._error is not None or not self._loading:
+            self._render_steam()
+        self._render_curator()
+        self._render_status()
 
-    def _on_steam_ready(self, stats):
-        self._steam_stats = stats
-        self._refresh_btn.setText("↻  Refresh")
-        self._refresh_btn.setEnabled(True)
-        self._render_all()
+    # ── Steam section ────────────────────────────────────────────────────────
 
-    # ── Full render ───────────────────────────────────────────────────────────
+    def _force_refresh(self) -> None:
+        self.refresh(force=True)
 
-    def _render_all(self):
-        all_games     = repo.get_all()
-        all_purchases = purchases.get_all()
-
-        h = hashlib.md5(json.dumps({
-            "games":     len(all_games),
-            "purchases": len(all_purchases),
-            "steam":     bool(self._steam_stats),
-        }).encode()).hexdigest()
-        if h == self._last_hash:
+    def _fetch_steam(self) -> None:
+        if self._loading:
             return
-        self._last_hash = h
+        from services.library_api import get_library_stats
+        self._loading = True
+        self._error = None
+        self._refresh_btn.set_loading(True)
+        if self._stats is None:
+            self._render_steam()          # skeletons
 
-        while self._lay.count():
-            item = self._lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        plt.close("all")
+        def on_done(result):
+            self._loading = False
+            self._refresh_btn.set_loading(False)
+            if isinstance(result, Exception):
+                self._stats = None
+                self._error = str(result) or type(result).__name__
+            else:
+                self._stats = result or None
+                self._error = None
+            self._render_steam()
 
-        self._lay.addWidget(_section_header(i18n.t("library.section_steam")))
-        if self._steam_stats:
-            self._render_steam_section(self._steam_stats)
+        run_async(self, get_library_stats, on_done=on_done)
+
+    def _render_steam(self) -> None:
+        clear_layout(self._steam_lay)
+        if self._stats is not None:
+            self._render_steam_stats(self._stats)
+        elif self._loading:
+            self._render_steam_skeleton()
         else:
-            self._render_steam_placeholder()
+            self._render_steam_error()
 
-        self._lay.addWidget(_section_header(i18n.t("library.section_curator")))
-        self._render_curator_section(all_games, all_purchases)
+    def _render_steam_skeleton(self) -> None:
+        grid_w = QWidget()
+        grid = _stat_grid(grid_w)
+        for i in range(4):
+            grid.addWidget(_skeleton_tile(), 0, i)
+        self._steam_lay.addWidget(grid_w)
+        cols = hbox(spacing=SP["lg"])
+        for _ in range(2):
+            col = vbox(spacing=SP["sm"])
+            col.addWidget(Skeleton(110, 10))
+            for _ in range(4):
+                col.addWidget(_skeleton_row())
+            col.addStretch()
+            cols.addLayout(col, 1)
+        self._steam_lay.addLayout(cols)
 
-        self._lay.addWidget(_section_header(i18n.t("library.section_status")))
-        self._render_status_section(all_games)
+    def _render_steam_error(self) -> None:
+        t = i18n.t
+        btn = Button(t("library.open_settings"), variant="primary", icon="settings",
+                     on_click=self._open_settings)
+        card = Card(padding=SP["sm"])
+        card.body.addWidget(EmptyState("library", t("library.error_title"),
+                                       self._error or t("library.connect_desc"), action=btn))
+        self._steam_lay.addWidget(card)
 
-        self._lay.addStretch()
+    def _open_settings(self) -> None:
+        win = self.window()
+        if hasattr(win, "show_view"):
+            win.show_view("settings")
 
-    # ── Section 1: Tu Steam ───────────────────────────────────────────────────
+    def _render_steam_stats(self, s: dict) -> None:
+        t = i18n.t
+        total = int(s.get("total_games") or 0)
+        never = int(s.get("never_played_count") or 0)
+        played = int(s.get("played_count") or 0)
+        recent = s.get("recently_played") or []
+        hours_2w = sum(float(g.get("hours_2w") or 0) for g in recent)
+        never_pct = round(never / total * 100) if total else 0
 
-    def _render_steam_placeholder(self):
-        from ui.settings_loader import get_settings
-        s        = get_settings()
-        steam_id = s.get("steam_id64", "").strip()
-        has_token= bool(s.get("steamkustom_token", "").strip())
+        grid_w = QWidget()
+        grid = _stat_grid(grid_w)
+        tiles = [
+            StatCard(t("library.games_owned"), icon="gamepad-2", tone="accent",
+                     caption=t("library.played_caption", n=f"{played:,}")),
+            StatCard(t("library.total_hours"), icon="clock", tone="violet",
+                     caption=t("library.avg_caption", h=f"{float(s.get('avg_playtime_hours') or 0):,.1f}")),
+            StatCard(t("library.played_2w"), icon="play", tone="green",
+                     caption=t("library.played_2w_caption", h=f"{hours_2w:,.1f}")),
+            StatCard(t("library.never_played"), icon="moon", tone=C["text_dim"],
+                     caption=t("library.never_pct", pct=never_pct)),
+        ]
+        _set(tiles[0], total)
+        _set(tiles[1], float(s.get("total_playtime_hours") or 0), fmt=_hours)
+        _set(tiles[2], len(recent))
+        _set(tiles[3], never)
+        for i, tile in enumerate(tiles):
+            grid.addWidget(tile, 0, i)
+        self._steam_lay.addWidget(grid_w)
 
-        if steam_id and has_token:
-            placeholder = _transparent_widget("LoadingPlaceholder")
-            pl = QVBoxLayout(placeholder)
-            pl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            pl.addWidget(_lbl(i18n.t("library.loading_steam"), 11, color=DIM))
-            self._lay.addWidget(placeholder)
-        else:
-            card = QFrame()
-            card.setObjectName("NoCredsCard")
-            card.setStyleSheet(f"""
-                QFrame#NoCredsCard {{
-                    background:{COLORS['card']};
-                    border:1px solid {COLORS['border']};
-                    border-left:3px solid {GOLD};
-                    border-radius:10px;
-                }}
-            """)
-            cl = QVBoxLayout(card)
-            cl.setContentsMargins(20, 16, 20, 16)
-            cl.setSpacing(6)
-            cl.addWidget(_lbl(i18n.t("library.connect_title"), 12,
-                               bold=True, color=GOLD))
-            cl.addWidget(_lbl(
-                i18n.t("library.connect_desc"),
-                10, color=DIM, wrap=True))
-            self._lay.addWidget(card)
+        cols = hbox(spacing=SP["lg"])
+        # most played
+        left = vbox(spacing=SP["sm"])
+        left.addWidget(label(t("library.top_played"), "eyebrow"))
+        top = (s.get("top_played") or [])[:_TOP_N]
+        max_h = max((float(g.get("hours") or 0) for g in top), default=0) or 1
+        for i, g in enumerate(top, start=1):
+            trailing = QWidget()
+            tr = hbox(trailing, spacing=SP["sm"])
+            bar = QProgressBar()
+            bar.setFixedWidth(_BAR_WIDTH)
+            bar.setTextVisible(False)
+            bar.setRange(0, 1000)
+            bar.setValue(int(float(g.get("hours") or 0) / max_h * 1000))
+            tr.addWidget(bar)
+            hl = label(_hours(float(g.get("hours") or 0)), "mono", color=C["text_2"])
+            hl.setFixedWidth(64)
+            hl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            tr.addWidget(hl)
+            rank = Pill(f"{i:02d}", "gold" if i == 1 else "neutral")
+            left.addWidget(ListRow(g.get("name", "?"), leading=rank, trailing=trailing, clickable=False))
+        if not top:
+            left.addWidget(label(t("library.recent_none"), "muted"))
+        left.addStretch()
+        cols.addLayout(left, 1)
 
-    def _render_steam_section(self, stats: dict):
-        # ── Row 1: big numbers ────────────────────────────────────
-        row1 = _transparent_widget("SteamRow1")
-        r1l = QHBoxLayout(row1)
-        r1l.setSpacing(10)
-        r1l.setContentsMargins(0, 0, 0, 0)
+        # recently played
+        right = vbox(spacing=SP["sm"])
+        right.addWidget(label(t("library.recently_played"), "eyebrow"))
+        for g in recent:
+            hl = label(_hours(float(g.get("hours_2w") or 0)), "mono", color=C["accent"])
+            right.addWidget(ListRow(g.get("name", "?"),
+                                    t("library.hours_total", h=f"{float(g.get('hours_total') or 0):,.0f}"),
+                                    trailing=hl, clickable=False))
+        if not recent:
+            right.addWidget(label(t("library.recent_none"), "muted"))
+        right.addStretch()
+        cols.addLayout(right, 1)
+        self._steam_lay.addLayout(cols)
 
-        never_pct = (int(stats["never_played_count"] /
-                         stats["total_games"] * 100)
-                     if stats["total_games"] else 0)
+    # ── curator section ──────────────────────────────────────────────────────
 
-        _stat_card(r1l, i18n.t("library.total_games"),  str(stats["total_games"]),         BLUE)
-        _stat_card(r1l, i18n.t("library.total_hours"),    f"{stats['total_playtime_hours']:,.0f}h", PURPLE)
-        _stat_card(r1l, i18n.t("library.avg_per_game"),   f"{stats['avg_playtime_hours']:.1f}h",   CYAN)
-        _stat_card(r1l, i18n.t("library.never_played"),        str(stats["never_played_count"]),   DIM,
-                   sub=i18n.t("library.never_pct").format(pct=never_pct))
-        self._lay.addWidget(row1)
+    def _render_curator(self) -> None:
+        t = i18n.t
+        clear_layout(self._curator_lay)
+        games = repo.get_all()
+        bought = purchases.get_all()
+        wishlist = [g for g in games if normalize_status(g.status) == STATUS_WISHLIST]
+        archived = [g for g in games if normalize_status(g.status) == STATUS_ARCHIVED]
 
-        # ── Row 2: most/least played ──────────────────────────────
-        if stats.get("most_played") or stats.get("least_played"):
-            row2 = _transparent_widget("SteamRow2")
-            r2l = QHBoxLayout(row2)
-            r2l.setSpacing(10)
-            r2l.setContentsMargins(0, 0, 0, 0)
-            if stats.get("most_played"):
-                mp = stats["most_played"]
-                _stat_card(r2l, i18n.t("library.most_played"),   f"{mp['hours']:,.0f}h", GREEN, sub=mp["name"][:28])
-            if stats.get("least_played"):
-                lp = stats["least_played"]
-                _stat_card(r2l, i18n.t("library.least_played"), f"{lp['hours']:.1f}h", PINK,  sub=lp["name"][:28])
-            self._lay.addWidget(row2)
+        grid_w = QWidget()
+        grid = _stat_grid(grid_w)
+        tiles = [
+            (StatCard(t("library.on_wishlist"), icon="heart", tone="accent"), len(wishlist)),
+            (StatCard(t("library.archived"), icon="bookmark", tone=C["text_dim"]), len(archived)),
+            (StatCard(t("library.total_tracked"), icon="layers", tone="violet"), len(games)),
+            (StatCard(t("library.games_bought"), icon="shopping-cart", tone="green"), len(bought)),
+        ]
+        for i, (tile, value) in enumerate(tiles):
+            _set(tile, value)
+            grid.addWidget(tile, 0, i)
+        self._curator_lay.addWidget(grid_w)
 
-        # ── Recently played ───────────────────────────────────────
-        if stats.get("recently_played"):
-            self._lay.addWidget(
-                _lbl(i18n.t("library.recently_played"), 10, color=DIM))
-            container = _transparent_widget("RecentContainer")
-            cl = QVBoxLayout(container)
-            cl.setSpacing(5)
-            cl.setContentsMargins(0, 0, 0, 0)
-            for g in stats["recently_played"]:
-                row = QFrame()
-                row.setObjectName("RecentRow")
-                row.setStyleSheet(f"""
-                    QFrame#RecentRow {{
-                        background:{COLORS['card']};
-                        border:1px solid {COLORS['border']};
-                        border-radius:7px;
-                    }}
-                """)
-                rl = QHBoxLayout(row)
-                rl.setContentsMargins(12, 7, 12, 7)
-                rl.addWidget(_lbl(g["name"], 10, bold=True), 1)
-                rl.addWidget(_lbl(i18n.t('library.hours_this_week').format(h=f"{g['hours_2w']:.1f}"), 9, color=BLUE))
-                rl.addWidget(_lbl(i18n.t('library.hours_total').format(h=f"{g['hours_total']:,.0f}"),    9, color=DIM))
-                cl.addWidget(row)
-            self._lay.addWidget(container)
+        if bought:
+            currency = bought[0].currency
+            spent = sum(p.price_paid for p in bought)
+            saved = sum(p.saved for p in bought)
+            base = sum(p.base_price for p in bought)
+            avg_disc = saved / base * 100 if base else 0
+            grid2_w = QWidget()
+            grid2 = _stat_grid(grid2_w)
+            money_tiles = [
+                (StatCard(t("library.total_spent"), icon="wallet", tone="gold",
+                          caption=t("library.spent_caption", n=len(bought))), spent),
+                (StatCard(t("library.total_saved"), icon="piggy-bank", tone="green",
+                          caption=t("library.saved_caption")), saved),
+                (StatCard(t("library.avg_discount"), icon="percent", tone="pink", caption=" "), None),
+                (StatCard(t("library.avg_per_game_spent"), icon="coins", tone="cyan", caption=" "),
+                 spent / len(bought)),
+            ]
+            for i, (tile, value) in enumerate(money_tiles):
+                if value is None:
+                    tile.set_value(pct(avg_disc), animate=False)
+                else:
+                    _set(tile, value, fmt=lambda v, c=currency: money(v, c))
+                grid2.addWidget(tile, 0, i)
+            self._curator_lay.addWidget(grid2_w)
 
-        # ── Top 10 chart ──────────────────────────────────────────
-        if stats.get("top_played"):
-            self._render_top_played_chart(stats["top_played"])
+        priced = [g for g in wishlist if g.price and g.price.current > 0]
+        if priced:
+            total = sum(g.price.current for g in priced)
+            card = Card(padding=SP["lg"], spacing=0)
+            row = hbox(spacing=SP["md"])
+            col = vbox(spacing=2)
+            col.addWidget(label(t("library.wishlist_value"), "body"))
+            col.addWidget(label(t("library.wishlist_value_caption", n=len(priced)), "muted"))
+            row.addLayout(col, 1)
+            row.addWidget(label(money(total, priced[0].price.currency), "value", color=C["accent"]))
+            card.body.addLayout(row)
+            self._curator_lay.addWidget(card)
 
-    def _render_top_played_chart(self, top: list):
-        self._lay.addWidget(_lbl(i18n.t("library.top10_chart"), 10, color=DIM))
-        names  = [g["name"][:26] for g in top]
-        hours  = [g["hours"]     for g in top]
-        colors = [BLUE, PURPLE, CYAN, GREEN, GOLD, PINK, ORANGE,
-                  "#818cf8", "#34d399", "#fb7185"][:len(top)]
+    # ── play status section ──────────────────────────────────────────────────
 
-        fig_h = max(4.0, len(top) * 0.7 + 0.8)
-        fig, ax = plt.subplots(figsize=(8, fig_h))
-        bars = ax.barh(names[::-1], hours[::-1],
-                       color=colors[::-1], height=0.55, linewidth=0)
-        ax.set_xticks([])
-        ax.tick_params(length=0)
-        ax.set_yticks(range(len(names)))
-        ax.set_yticklabels(names[::-1], color=TEXT, fontsize=10)
-        max_h = max(hours) if hours else 1
-        for bar, h in zip(bars, hours[::-1]):
-            ax.text(bar.get_width() + max_h * 0.01,
-                    bar.get_y() + bar.get_height() / 2,
-                    f"{h:,.0f}h", va="center", color=TEXT, fontsize=10,
-                    fontweight="bold")
-        ax.set_xlim(0, max_h * 1.20)
-        # Better margins — tight_layout alone can clip rotated labels
-        fig.subplots_adjust(left=0.28, right=0.94, top=0.97, bottom=0.05)
-
-        # _embed_chart colours fig + ax + canvas all with COLORS["bg"]
-        _embed_chart(self._lay, fig, min_height=int(fig_h * 100))
-
-    # ── Section 2: Steam Curator ──────────────────────────────────────────────
-
-    def _render_curator_section(self, all_games: list, all_purchases: list):
-        wishlist = [g for g in all_games if normalize_status(g.status) == "Wishlist"]
-        archived = [g for g in all_games if normalize_status(g.status) == "Archivado"]
-
-        # Stats row
-        row = _transparent_widget("CuratorRow1")
-        rl = QHBoxLayout(row)
-        rl.setSpacing(10); rl.setContentsMargins(0, 0, 0, 0)
-        _stat_card(rl, i18n.t("library.on_wishlist"),   str(len(wishlist)),       BLUE)
-        _stat_card(rl, i18n.t("library.archived"),    str(len(archived)),       DIM)
-        _stat_card(rl, i18n.t("library.total_tracked"), str(len(all_games)),      PURPLE)
-        _stat_card(rl, i18n.t("library.games_bought"),  str(len(all_purchases)),  GREEN)
-        self._lay.addWidget(row)
-
-        if all_purchases:
-            total_spent = sum(p.price_paid for p in all_purchases)
-            total_saved = sum(p.saved      for p in all_purchases)
-            base_total  = sum(p.base_price for p in all_purchases)
-            avg_disc    = int(total_saved / base_total * 100) if base_total else 0
-            currency    = all_purchases[0].currency
-
-            row2 = _transparent_widget("CuratorRow2")
-            r2l = QHBoxLayout(row2)
-            r2l.setSpacing(10); r2l.setContentsMargins(0, 0, 0, 0)
-            _stat_card(r2l, i18n.t("library.total_spent"),        f"{total_spent:,.0f} {currency}",                GOLD)
-            _stat_card(r2l, i18n.t("library.total_saved"),      f"{total_saved:,.0f} {currency}",                GREEN)
-            _stat_card(r2l, i18n.t("library.avg_discount"),  f"{avg_disc}%",                                  PINK)
-            _stat_card(r2l, i18n.t("library.avg_per_game_spent"),    f"{total_spent/len(all_purchases):,.0f} {currency}", CYAN)
-            self._lay.addWidget(row2)
-
-            # ── Purchase list ─────────────────────────────────────────────────
-            self._lay.addSpacing(6)
-            self._lay.addWidget(_section_header(i18n.t("library.games_bought_title")))
-
-            for i, p in enumerate(sorted(all_purchases,
-                                         key=lambda x: x.purchased_at, reverse=True)):
-                # Use a stable object name that doesn't embed the index so QSS
-                # isn't recomputed for every row on every render.
-                row_w = QFrame()
-                row_w.setObjectName("PurchaseRow")
-                row_w.setStyleSheet(f"""
-                    QFrame#PurchaseRow {{
-                        background:{COLORS['card']};
-                        border:1px solid {COLORS['border']};
-                        border-radius:8px;
-                    }}
-                """)
-                rl2 = QHBoxLayout(row_w)
-                rl2.setContentsMargins(14, 9, 14, 9)
-                rl2.setSpacing(10)
-
-                info_w = _transparent_widget(f"PurchaseInfo_{i}")
-                il = QVBoxLayout(info_w); il.setContentsMargins(0,0,0,0); il.setSpacing(2)
-                il.addWidget(_lbl(p.name, 12, bold=True))
-                if p.edition and p.edition not in ("Standard Edition", "Standard"):
-                    il.addWidget(_lbl(p.edition, 10, color=GOLD))
-                rl2.addWidget(info_w, 1)
-
-                price_w = _transparent_widget(f"PurchasePrice_{i}")
-                pl = QVBoxLayout(price_w); pl.setContentsMargins(0,0,0,0); pl.setSpacing(1)
-                pl.setAlignment(Qt.AlignmentFlag.AlignRight)
-                pl_lbl = _lbl(f"${p.price_paid:,.0f} {p.currency}", 12, bold=True, color=BLUE)
-                pl_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
-                pl.addWidget(pl_lbl)
-                if p.saved > 0:
-                    sv = _lbl(f"saved ${p.saved:,.0f} (-{p.discount_pct}%)", 9, color=GREEN)
-                    sv.setAlignment(Qt.AlignmentFlag.AlignRight)
-                    pl.addWidget(sv)
-                rl2.addWidget(price_w)
-
-                date_l = _lbl(p.purchased_at or "", 10, color=DIM)
-                date_l.setFixedWidth(85)
-                date_l.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                rl2.addWidget(date_l)
-
-                self._lay.addWidget(row_w)
-                if i < len(all_purchases) - 1:
-                    self._lay.addSpacing(4)
-
-        # Wishlist current value
-        wishlist_priced = [g for g in wishlist if g.price and g.price.current > 0]
-        if wishlist_priced:
-            total_wl = sum(g.price.current for g in wishlist_priced)
-            currency = wishlist_priced[0].price.currency
-            info = QFrame()
-            info.setObjectName("WishlistValueCard")
-            info.setStyleSheet(f"""
-                QFrame#WishlistValueCard {{
-                    background:{COLORS['card']};
-                    border:1px solid {COLORS['border']};
-                    border-left:3px solid {BLUE};
-                    border-radius:8px;
-                }}
-            """)
-            il = QHBoxLayout(info)
-            il.setContentsMargins(14, 10, 14, 10)
-            il.addWidget(_lbl(i18n.t("library.wishlist_value"), 10, color=DIM))
-            il.addStretch()
-            il.addWidget(_lbl(f"{total_wl:,.0f} {currency}", 14, bold=True, color=BLUE))
-            il.addWidget(_lbl(i18n.t("library.wishlist_games_count").format(n=len(wishlist_priced)), 10, color=DIM))
-            self._lay.addWidget(info)
-
-    # ── Section 3: Estado ─────────────────────────────────────────────────────
-
-    def _render_status_section(self, all_games: list):
-        # normalize_status() catches games whose status was saved as a
-        # translated i18n string by an older version of the app (e.g.
-        # "Comprado", "Purchased", "Acheté"), so they still show up here
-        # instead of silently vanishing because the literal text didn't
-        # match "Comprado" exactly.
-        comprados = [g for g in all_games if normalize_status(g.status) == STATUS_PURCHASED]
-        if not comprados:
-            self._lay.addWidget(
-                _lbl(i18n.t("library.mark_to_see"), 10, color=DIM))
+    def _render_status(self) -> None:
+        t = i18n.t
+        clear_layout(self._status_lay)
+        owned = [g for g in repo.get_all() if normalize_status(g.status) == STATUS_PURCHASED]
+        self._status_desc.setVisible(bool(owned))
+        if not owned:
+            self._status_lay.addWidget(label(t("library.mark_to_see"), "muted"))
             return
 
-        counts = {key: 0 for key, *_ in PLAY_STATUS_OPTIONS}
-        for g in comprados:
-            ps = g.play_status or ""
-            if ps in counts:
-                counts[ps] += 1
+        counts = {k: 0 for k in PLAY_STATUSES if k}
+        for g in owned:
+            if g.play_status in counts:
+                counts[g.play_status] += 1
+        grid_w = QWidget()
+        grid = _stat_grid(grid_w)
+        for i, (key, (icon, tone)) in enumerate(PLAY_STATUS_STYLE.items()):
+            tile = StatCard(t(f"play_status.{key}"), icon=icon, tone=tone)
+            _set(tile, counts[key])
+            grid.addWidget(tile, 0, i)
+        self._status_lay.addWidget(grid_w)
 
-        # Stat pills
-        row = _transparent_widget("StatusRow")
-        rl = QHBoxLayout(row)
-        rl.setSpacing(10)
-        rl.setContentsMargins(0, 0, 0, 0)
-        for key, label, color in PLAY_STATUS_OPTIONS:
-            _stat_card(rl, label, str(counts.get(key, 0)), color)
-        self._lay.addWidget(row)
+        for g in sorted(owned, key=lambda x: x.name.lower()):
+            self._status_lay.addWidget(self._status_row(g))
 
-        # Donut chart
-        labeled = [(label, counts.get(key, 0), color)
-                   for key, label, color in PLAY_STATUS_OPTIONS]
-        if sum(c for _, c, _ in labeled) > 0:
-            self._render_status_chart(labeled)
+    def _status_row(self, game: Game) -> ListRow:
+        t = i18n.t
+        combo = QComboBox()
+        combo.setMinimumHeight(30)
+        combo.setMinimumWidth(150)
+        combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        for key in PLAY_STATUSES:
+            combo.addItem(t(f"play_status.{key}") if key else t("library.play_status_none"), key)
+        idx = PLAY_STATUSES.index(game.play_status) if game.play_status in PLAY_STATUSES else 0
+        combo.setCurrentIndex(idx)
+        combo.currentIndexChanged.connect(lambda _i, g=game, c=combo: self._set_play_status(g, c.currentData()))
+        bits = [translate_genres(game.genre) if game.genre else "", str(game.release_year or "")]
+        subtitle = " · ".join(b for b in bits if b)
+        return ListRow(game.name, subtitle, leading=PriorityBadge(game.priority), trailing=combo,
+                       clickable=False)
 
-        # Per-game status list
-        self._lay.addWidget(
-            _lbl(i18n.t("library.status_list_title"), 10, color=DIM))
-        container = _transparent_widget("StatusList")
-        cl = QVBoxLayout(container)
-        cl.setSpacing(5)
-        cl.setContentsMargins(0, 0, 0, 0)
-        for g in sorted(comprados, key=lambda x: x.name):
-            self._make_game_status_row(cl, g)
-        self._lay.addWidget(container)
-
-    def _render_status_chart(self, labeled: list):
-        values = [c   for _, c, _ in labeled if c > 0]
-        labels = [lbl for lbl, c, _ in labeled if c > 0]
-        colors = [col for _, c, col in labeled if c > 0]
-        if not values:
+    def _set_play_status(self, game: Game, key: str) -> None:
+        key = key or ""
+        if key == (game.play_status or ""):
             return
-
-        fig, ax = plt.subplots(figsize=(5, 2.5))
-        # NOTE: wedge edgecolor uses COLORS["bg"] so the gap between slices
-        # matches the page background — not a hard-coded "#09090b".
-        _, texts, autotexts = ax.pie(
-            values, labels=labels, colors=colors,
-            autopct="%1.0f%%", startangle=90,
-            wedgeprops={"linewidth": 2, "edgecolor": COLORS["bg"]},
-            textprops={"color": TEXT, "fontsize": 8},
-        )
-        for at in autotexts:
-            at.set_color(COLORS["bg"])
-            at.set_fontsize(8)
-            at.set_fontweight("bold")
-        ax.set_aspect("equal")
-        fig.subplots_adjust(left=0.1, right=0.9, top=0.95, bottom=0.05)
-
-        # Centre the donut — _embed_chart colours everything with COLORS["bg"]
-        _embed_chart(self._lay, fig, center=True, min_height=260)
-
-    def _make_game_status_row(self, lay, game):
-        row = QFrame()
-        row.setObjectName("GameStatusRow")
-        row.setStyleSheet(f"""
-            QFrame#GameStatusRow {{
-                background:{COLORS['card']};
-                border:1px solid {COLORS['border']};
-                border-radius:7px;
-            }}
-        """)
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(12, 6, 12, 6)
-        rl.setSpacing(8)
-        rl.addWidget(_lbl(game.name, 10, bold=True), 1)
-
-        for key, label, color in PLAY_STATUS_OPTIONS:
-            icon   = PLAY_STATUS_ICON.get(key, "")
-            active = game.play_status == key
-            btn    = QPushButton(f"{icon} {label}")
-            btn.setObjectName(f"StatusBtn_{game.id}_{key}")
-            btn.setFixedHeight(24)
-            btn.setCheckable(True)
-            btn.setChecked(active)
-            btn.setStyleSheet(self._status_btn_style(color, active))
-            btn.clicked.connect(
-                lambda _, g=game, k=key, r=row: self._set_play_status(g, k, r))
-            rl.addWidget(btn)
-
-        lay.addWidget(row)
-
-    @staticmethod
-    def _status_btn_style(color: str, active: bool) -> str:
-        bg = "rgba(255,255,255,0.07)" if active else "transparent"
-        fg = color if active else DIM
-        bd = color if active else COLORS["border"]
-        return f"""
-            QPushButton {{
-                background:{bg}; color:{fg};
-                border:1px solid {bd}; border-radius:4px;
-                font-family:'Space Mono'; font-size:9px;
-                padding:0 7px;
-            }}
-            QPushButton:hover {{
-                background:rgba(255,255,255,0.07);
-                color:{color}; border:1px solid {color};
-            }}
-        """
-
-    def _set_play_status(self, game, key: str, row: QFrame):
-        new_status         = "" if game.play_status == key else key
-        game.play_status   = new_status
+        game.play_status = key
         repo.update(game)
-        self._last_hash    = None   # force re-render of chart next time
-
-        # Update button styles in place without rebuilding the row
-        rl = row.layout()
-        for i in range(rl.count()):
-            w = rl.itemAt(i).widget()
-            if not isinstance(w, QPushButton):
-                continue
-            for k, label, color in PLAY_STATUS_OPTIONS:
-                icon = PLAY_STATUS_ICON.get(k, "")
-                if w.text().strip() == f"{icon} {label}".strip():
-                    active = new_status == k
-                    w.setChecked(active)
-                    w.setStyleSheet(self._status_btn_style(color, active))
-                    break
+        self._render_status()

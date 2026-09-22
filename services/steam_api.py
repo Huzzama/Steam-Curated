@@ -2,40 +2,33 @@ import time as _time
 from functools import lru_cache
 from typing import Optional
 
-import requests
+import logging
+
 from data.models import PriceInfo
+from services._http import SESSION as _SESSION
+
+log = logging.getLogger("curator.steam")
 
 # ── Price cache (1 hour TTL) ──────────────────────────────────────────────────
 _price_cache: dict = {}
 _PRICE_TTL = 3600
 
-def _get_cached_price(app_id: str) -> Optional[PriceInfo]:
-    entry = _price_cache.get(str(app_id))
-    if entry and (_time.time() - entry[1]) < _PRICE_TTL:
-        return entry[0]
-    return None
-
-def _set_cached_price(app_id: str, price: PriceInfo):
-    _price_cache[str(app_id)] = (price, _time.time())
-
 def clear_price_cache():
     _price_cache.clear()
 
-# ── HTTP session (reuse TCP connections) ──────────────────────────────────────
-import certifi as _certifi
-_SESSION = requests.Session()
-_SESSION.headers.update({"Accept-Language": "en-US,en;q=0.9"})
-_SESSION.verify = _certifi.where()  # fix SSL on macOS
+# ── App details cache (1 h TTL — prices live inside appdetails) ───────────────
+# Only caches successes, never None. The old "cache forever" meant every
+# "refresh prices" button returned the price from the first look-up of the
+# session.
+_app_details_cache: dict = {}          # key → (data, fetched_at)
+_APP_DETAILS_TTL = 3600
 
-# ── App details cache (immutable data — cache forever per session) ────────────
-# Manual app details cache — only caches successes, never None
-_app_details_cache: dict = {}
-
-def _cached_app_details(app_id: str, country: str) -> Optional[dict]:
+def _cached_app_details(app_id: str, country: str, force: bool = False) -> Optional[dict]:
     """Cache app details — only caches successful responses."""
     key = f"{app_id}:{country}"
-    if key in _app_details_cache:
-        return _app_details_cache[key]
+    entry = _app_details_cache.get(key)
+    if entry and not force and (_time.time() - entry[1]) < _APP_DETAILS_TTL:
+        return entry[0]
     url = "https://store.steampowered.com/api/appdetails"
     try:
         r = _SESSION.get(url, params={"appids": app_id, "cc": country,
@@ -44,16 +37,16 @@ def _cached_app_details(app_id: str, country: str) -> Optional[dict]:
         r.raise_for_status()
         data = r.json().get(str(app_id), {})
         if data.get("success") and data.get("data"):
-            _app_details_cache[key] = data  # only cache success
+            _app_details_cache[key] = (data, _time.time())  # only cache success
             return data
         return None
-    except Exception as _e:
-        print(f"[SteamAPI] _cached_app_details({app_id}, {country}) error: {_e}")
+    except Exception as _e:  # noqa: BLE001
+        log.warning("appdetails(%s, %s): %s", app_id, country, _e)
         return None  # don't cache failures
 
 
-def get_app_details(app_id: str, country: str = "mx") -> Optional[dict]:
-    data = _cached_app_details(str(app_id), str(country).lower())
+def get_app_details(app_id: str, country: str = "mx", force: bool = False) -> Optional[dict]:
+    data = _cached_app_details(str(app_id), str(country).lower(), force=force)
     return data.get("data") if data else None
 
 
@@ -72,16 +65,21 @@ def parse_price(data: dict) -> Optional[PriceInfo]:
     )
 
 
-def refresh_price(app_id: str, country: str = "mx") -> Optional[PriceInfo]:
-    """Price refresh with 1h TTL cache per (app_id, country)."""
+def refresh_price(app_id: str, country: str = "mx", force: bool = False) -> Optional[PriceInfo]:
+    """Price refresh with 1h TTL cache per (app_id, country); force=True hits Steam."""
     cache_key = f"{app_id}:{country}"
     entry = _price_cache.get(cache_key)
-    if entry and (_time.time() - entry[1]) < _PRICE_TTL:
+    if entry and not force and (_time.time() - entry[1]) < _PRICE_TTL:
         return entry[0]
-    data  = get_app_details(app_id, country)
+    data  = get_app_details(app_id, country, force=force)
     price = parse_price(data) if data else None
     if price:
         _price_cache[cache_key] = (price, _time.time())
+        try:
+            from services import price_history
+            price_history.observe(app_id, price)
+        except Exception as e:  # noqa: BLE001
+            log.debug("observe failed: %s", e)
     return price
 
 
@@ -153,9 +151,8 @@ def bulk_refresh_prices(
         result = "failed"
         try:
             if force:
-                _app_details_cache.pop(f"{game.app_id}:{country}", None)
                 _price_cache.pop(f"{game.app_id}:{country}", None)
-            data = get_app_details(game.app_id, country=country)
+            data = get_app_details(game.app_id, country=country, force=force)
             new_price = parse_price(data) if data else None
 
             if new_price is not None:
@@ -198,6 +195,24 @@ def bulk_refresh_prices(
                     with lock:
                         failed_c[0] += 1
 
+        # Feed the local price log (tier-2 history) and pull all-time lows —
+        # ITAD in two batched requests when a key is set, observed log otherwise.
+        try:
+            from services import price_history
+            price_history.observe_many((g.app_id, g.price) for g in games)
+            hists = price_history.get_price_histories(games, country, force=force)
+            with lock:
+                saving = {id(g) for g in to_save}
+                for g in games:
+                    merged = price_history.merge(g.price_history, hists.get(str(g.app_id)))
+                    if merged is not None and merged != g.price_history:
+                        g.price_history = merged
+                        if id(g) not in saving:
+                            to_save.append(g)
+                            saving.add(id(g))
+        except Exception as e:  # noqa: BLE001
+            log.warning("price history update skipped: %s", e)
+
         # Single write pass for every game whose price actually changed —
         # see the docstring above for why this replaced per-game writes.
         updated_count = 0
@@ -205,7 +220,7 @@ def bulk_refresh_prices(
             try:
                 updated_count = repo.update_many(to_save)
             except Exception as e:
-                print(f"[SteamAPI] bulk_refresh_prices: update_many failed: {e}")
+                log.error("bulk_refresh_prices: update_many failed: %s", e)
                 with lock:
                     failed_c[0] += len(to_save)
                 updated_count = 0
@@ -295,4 +310,4 @@ def parse_metadata(data: dict) -> dict:
                                  data.get("release_date", {}).get("date", "")),
         "price":             parse_price(data),
         "steam_url":         f"https://store.steampowered.com/app/{data.get('steam_appid', '')}",
-    }
+    }

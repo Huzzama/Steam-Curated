@@ -1,28 +1,40 @@
-# Secrets — NUNCA subir
+# ── Secretos y datos del usuario — NUNCA subir ───────────────────────────────
+creds.json
 client_secret.json
 token.json
 settings.json
 *.json
+*.json.bak
+*.json.tmp
+*.corrupt.json
 
 # Excepciones — estos JSON sí deben subir
 !locales/**/*.json
 !data/models_schema.json
 
+# Datos generados en runtime
+wishlist.json
+purchases.json
+price_log.json
+assets/covers/
+sale_cache/
+logs/
+biblioteca.xlsx
+
 # Python
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
 .venv/
 venv/
 *.egg-info/
 
-# Data generada en runtime
-wishlist.json
-purchases.json
-assets/covers/
-
-# macOS
+# Editores / SO
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
 
 # Build
 dist/

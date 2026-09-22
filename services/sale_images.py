@@ -1,180 +1,157 @@
 """
-Sale image loader — downloads images from PimpMySteam server.
+Sale banners + sale dates from the PimpMySteam server.
 
-Strategy: always re-download on startup (delete old cache first).
-This ensures server-side image updates are reflected immediately.
-Images are stored in a session temp dir that's cleared each run.
+Strategy: keep a persistent cache on disk and refresh it in the background.
+On startup the Deals screen renders immediately from the cached banners and
+cached sales_dates.json; when the refresh finishes the view is told to
+re-render (via a Qt-safe callback supplied by the caller).
+
+The previous version deleted the cache on every launch and re-downloaded
+everything, so the screen stayed blank (and polled for 20 s per banner)
+whenever the backend was slow or offline.
 """
-import threading
-import urllib.request
-import ssl
+from __future__ import annotations
+
 import json
+import logging
+import threading
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Callable, Optional
 
-API_URL = "https://api.pimpmysteam.com"
+from config import BASE_DIR
+from services._http import SESSION
 
-# In-memory registry: key → local Path (populated after download)
-_session_images: dict[str, Path] = {}
-_download_done  = False
-_done_callbacks: list[Callable] = []
-_lock           = threading.Lock()
+log = logging.getLogger("curator.sales")
 
-# Sale events loaded from server JSON (same session lifetime as images)
 _sale_events: list[dict] = []
+_images: dict[str, Path] = {}          # key → local path
+_ready = False
+_lock  = threading.Lock()
 
-SALES_DATES_URL = f"{API_URL}/static/sale-images/sales_dates.json"
+
+def _api_url() -> str:
+    from services.steamkustom_auth import get_api_url
+    return get_api_url()
 
 
 def _cache_dir() -> Path:
-    import sys
-    if sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support" / "SteamCurator"
-    elif sys.platform == "win32":
-        import os
-        base = Path(os.environ.get("APPDATA", Path.home())) / "SteamCurator"
-    else:
-        base = Path.home() / ".local" / "share" / "SteamCurator"
-    d = base / "sale_cache"
+    d = BASE_DIR / "sale_cache"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def _clear_cache():
-    """Delete all cached images — called once per session on startup."""
-    try:
-        cache = _cache_dir()
+def _events_file() -> Path:
+    return _cache_dir() / "sales_dates.json"
+
+
+def _load_from_disk() -> None:
+    """Populate the in-memory registry from what a previous run cached."""
+    global _sale_events
+    cache = _cache_dir()
+    with _lock:
         for f in cache.iterdir():
             if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
-                f.unlink()
-        print(f"[SaleImages] Cache cleared for fresh session")
-    except Exception as e:
-        print(f"[SaleImages] Cache clear error: {e}")
+                _images[f.stem] = f
+        try:
+            payload = json.loads(_events_file().read_text(encoding="utf-8"))
+            _sale_events = payload.get("events", []) or []
+        except Exception:  # noqa: BLE001
+            _sale_events = []
 
 
 def get_local_path(key: str) -> Optional[Path]:
-    """Return the local path for a given image key, or None if not downloaded yet."""
     with _lock:
-        return _session_images.get(key)
+        return _images.get(key)
 
 
 def get_sale_events() -> list[dict]:
-    """
-    Return sale events loaded from the server JSON.
-    Returns an empty list if the download hasn't completed or failed —
-    callers should fall back to config.STEAM_SALE_EVENTS in that case.
-    """
+    """Events from the server JSON (last cached copy if offline). [] → caller
+    falls back to config.STEAM_SALE_EVENTS."""
     with _lock:
         return list(_sale_events)
 
 
-def _fetch(url: str, timeout: int = 15) -> Optional[bytes]:
-    try:
-        import certifi
-        ctx = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        ctx = ssl.create_default_context()
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "SteamCurator/2.0"})
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-            return r.read()
-    except Exception as e:
-        print(f"[SaleImages] fetch error {url[:80]}: {e}")
-        return None
-
-
-def _download_sale_dates():
-    """
-    Fetch sales_dates.json from the server and populate _sale_events.
-    Called at the end of _download_all() so events and images share
-    the same session lifecycle.
-    """
-    global _sale_events
-    print("[SaleImages] Fetching sales_dates.json from server…")
-    try:
-        data = _fetch(SALES_DATES_URL)
-        if not data:
-            print("[SaleImages] No sales_dates.json from server — "
-                  "falling back to config.STEAM_SALE_EVENTS")
-            return
-        payload = json.loads(data)
-        events  = payload.get("events", [])
-        if events:
-            with _lock:
-                _sale_events = events
-            print(f"[SaleImages] Loaded {len(events)} sale events from server")
-        else:
-            print("[SaleImages] sales_dates.json contained no events — "
-                  "falling back to config.STEAM_SALE_EVENTS")
-    except Exception as e:
-        print(f"[SaleImages] sales_dates.json fetch error: {e} — "
-              "falling back to config.STEAM_SALE_EVENTS")
-
-
-def _download_all():
-    global _download_done
-    print("[SaleImages] Fetching image list from server…")
-    try:
-        data = _fetch(f"{API_URL}/stats/sale-images")
-        if not data:
-            print("[SaleImages] No data from server")
-            return
-        images = json.loads(data).get("images", {})
-        print(f"[SaleImages] Server has {len(images)} images: {list(images.keys())}")
-        cache  = _cache_dir()
-
-        for key, path in images.items():
-            url = path if path.startswith("http") else f"{API_URL}{path}"
-            ext = "." + path.split(".")[-1] if "." in path.split("/")[-1] else ".jpg"
-            img_data = _fetch(url)
-            if img_data:
-                dest = cache / f"{key}{ext}"
-                dest.write_bytes(img_data)
-                with _lock:
-                    _session_images[key] = dest
-                print(f"[SaleImages] Downloaded: {key}")
-            else:
-                print(f"[SaleImages] Failed: {key}")
-    except Exception as e:
-        print(f"[SaleImages] download error: {e}")
-    finally:
-        with _lock:
-            _download_done = True
-
-    # ── Fetch sale event dates (runs after images, regardless of image errors) ─
-    _download_sale_dates()
-
-
-def refresh_all(on_done: Callable = None):
-    """
-    Clear cache and re-download all images from server.
-    Calls on_done() in the download thread when complete.
-    """
-    global _download_done, _session_images, _sale_events
-    with _lock:
-        _download_done  = False
-        _session_images = {}
-        _sale_events    = []
-
-    _clear_cache()
-
-    def _work():
-        _download_all()
-        if on_done:
-            on_done()
-
-    threading.Thread(target=_work, daemon=True).start()
-
-
 def is_ready() -> bool:
     with _lock:
-        return _download_done
+        return _ready
 
 
-# Backward compat
-def cache_dir():
-    return _cache_dir()
+def _download_all() -> bool:
+    """Refresh banners + dates. Returns True if anything changed."""
+    global _sale_events
+    changed = False
+    cache = _cache_dir()
+    api = _api_url()
 
-def get_banner_path(event_key, **_):
-    p = get_local_path(event_key)
-    return str(p) if p else ""
+    # 1. Sale dates
+    try:
+        r = SESSION.get(f"{api}/static/sale-images/sales_dates.json", timeout=15)
+        r.raise_for_status()
+        payload = r.json()
+        events = payload.get("events", []) or []
+        if events:
+            with _lock:
+                if events != _sale_events:
+                    _sale_events = events
+                    changed = True
+            _events_file().write_text(json.dumps(payload), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        log.info("sales_dates.json not refreshed: %s", e)
+
+    # 2. Banner images
+    try:
+        r = SESSION.get(f"{api}/stats/sale-images", timeout=15)
+        r.raise_for_status()
+        images = r.json().get("images", {}) or {}
+    except Exception as e:  # noqa: BLE001
+        log.info("sale-images list not refreshed: %s", e)
+        images = {}
+
+    for key, path in images.items():
+        url = path if path.startswith("http") else f"{api}{path}"
+        ext = "." + path.rsplit(".", 1)[-1] if "." in path.rsplit("/", 1)[-1] else ".jpg"
+        dest = cache / f"{key}{ext}"
+        try:
+            headers = {}
+            if dest.exists():
+                # Ask the server only for a newer copy
+                from email.utils import formatdate
+                headers["If-Modified-Since"] = formatdate(dest.stat().st_mtime, usegmt=True)
+            r = SESSION.get(url, headers=headers, timeout=20)
+            if r.status_code == 304:
+                continue
+            r.raise_for_status()
+            dest.write_bytes(r.content)
+            with _lock:
+                _images[key] = dest
+            changed = True
+        except Exception as e:  # noqa: BLE001
+            log.info("banner %s not refreshed: %s", key, e)
+            if dest.exists():
+                with _lock:
+                    _images[key] = dest
+    return changed
+
+
+def refresh_all(on_done: Optional[Callable[[bool], None]] = None) -> None:
+    """
+    Load the cached copy now, refresh from the server in a thread, then call
+    on_done(changed) FROM THE WORKER THREAD — callers must hop back to the
+    GUI thread themselves (see ui.async_bridge.run_async).
+    """
+    global _ready
+    _load_from_disk()
+
+    def _work():
+        global _ready
+        try:
+            changed = _download_all()
+        except Exception as e:  # noqa: BLE001
+            log.warning("sale refresh failed: %s", e)
+            changed = False
+        with _lock:
+            _ready = True
+        if on_done:
+            on_done(changed)
+
+    threading.Thread(target=_work, daemon=True).start()

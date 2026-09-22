@@ -1,660 +1,564 @@
+"""
+Wishlist — the home view: every tracked game as a GameCard grid, with
+search, status / priority filters, sort, and a stat row on top.
+
+    WishlistView(parent, on_add_game=..., on_game_click=...)
+    view.refresh(force=False)     reload from the repository and re-render
+    view.retranslate()            update visible strings in place
+
+Rendering only builds the cards of the current filter, in chunks driven by a
+zero-interval QTimer so 600+ games never freeze the GUI. Bulk price refresh,
+cover download and the Excel export run through ui.async_bridge.run_async.
+"""
 from __future__ import annotations
+
+import re
 import threading
+from collections import Counter, deque
 from typing import Callable, Optional
 
-from PySide6.QtWidgets import (
-    QFrame, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QLineEdit, QScrollArea,
-    QGridLayout, QSizePolicy, QApplication,
-)
-from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSize
-from PySide6.QtGui import QPixmap, QColor, QPainter, QFont
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import QComboBox, QGridLayout, QMenu, QProgressBar, QSizePolicy, QWidget
 
 import i18n
-from ui.library_view import translate_genre
 import data.repository as repo
 from data.models import Game
 from data.status import STATUS_PURCHASED, normalize_status
-from config import COLORS, PRIORITY_COLORS, PRIORITY_OPTIONS
-from ui.widgets import SteamButton, StatCard, SectionHeader
+from ui import icons
+from ui.animations import clear_layout
+from ui.async_bridge import run_async
+from ui.components import (Button, ChipGroup, EmptyState, FlowLayout, IconButton, PriorityBadge,
+                           SearchField, SectionHeader, Segmented, StatCard, SubHeader, hbox,
+                           label, scroll_area, vbox)
+from ui.format import compact, money, pct
+from ui.game_card import GameCard
+from ui.theme import C, SP
 
-COLS     = 6
-MAX_ROWS = 100
-CARD_W   = 148
-IMG_H    = 200
+PRIORITIES = ("S", "A", "B", "C")
+STATUS_FILTERS = ("all", "sa", "sale", "purchased")
+SORTS = ("priority", "name", "price", "discount", "added")
+
+_CHUNK = 16              # cards built per timer tick (~60 ms)
+_SEARCH_DEBOUNCE = 150   # ms
+_LOW_TOLERANCE = 1.05    # "at all-time low" = within 5 % of the low (same rule as GameCard)
+_PRIO_PREFIX = re.compile(r"^[SABC]\s*[—–-]\s*")
+_STATS_4COL_MIN = 940    # view width below which the stat tiles wrap 2 × 2
 
 
-# ── Signal bridge ─────────────────────────────────────────────────────────────
-
-class _Bridge(QObject):
-    images_ready = Signal(list)   # list of (card, QPixmap)
-    layout_done  = Signal()
+def _is_purchased(g: Game) -> bool:
+    return normalize_status(g.status) == STATUS_PURCHASED
 
 
-# ── Game card ─────────────────────────────────────────────────────────────────
+def _on_sale(g: Game) -> bool:
+    return g.price is not None and g.price.is_on_sale and g.price.discount_pct > 0
 
-class _GameCard(QFrame):
-    CARD_W = CARD_W
-    IMG_H  = IMG_H
 
-    def __init__(self, parent=None, on_click: Callable = None):
+def _at_low(g: Game) -> bool:
+    p, h = g.price, g.price_history
+    return p is not None and h is not None and h.all_time_low > 0 and p.current <= h.all_time_low * _LOW_TOLERANCE
+
+
+def _money_fit(amount: float, currency: str) -> str:
+    """money() for a stat tile: sums >= 10 000 are compacted ('MX$12.3K') so the
+    big mono value never overflows the card; symbol placement follows money()."""
+    if abs(amount) < 10_000:
+        return money(amount, currency)
+    sample = money(1, currency)                    # 'MX$1.00' or '1.00 zł' or '¥1'
+    num = "1.00" if "1.00" in sample else "1"
+    return sample.replace(num, compact(amount), 1)
+
+
+def _dominant_currency(games: list[Game]) -> str:
+    """Currency shared by most priced games (falls back to USD)."""
+    counts = Counter(g.price.currency for g in games if g.price and g.price.currency)
+    return counts.most_common(1)[0][0] if counts else "USD"
+
+
+class WishlistView(QWidget):
+    """Grid of GameCards with filters, sort, stats and bulk actions."""
+
+    def __init__(self, parent=None, on_add_game: Optional[Callable[[], None]] = None,
+                 on_game_click: Optional[Callable[[Game], None]] = None, **deps):
         super().__init__(parent)
-        self._on_click  = on_click
-        self._game: Optional[Game] = None
-        self._visible   = False
-        self.setFixedWidth(CARD_W)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._on_add_game = on_add_game
+        self._on_game_click = on_game_click
+        self._notify_dep: Optional[Callable] = deps.get("notify")
+        self._data_changed_dep: Optional[Callable] = deps.get("on_data_changed")
+
+        self._games: list[Game] = []
+        self._query = ""
+        self._status = "all"
+        self._priority = "any"
+        self._sort = "priority"
+        self._busy = False
+
+        self._pending: deque[tuple[FlowLayout, Game]] = deque()
+        self._generation = 0
+        self._group_headers: dict[str, SubHeader] = {}
+
+        self._build_timer = QTimer(self)          # chunked card construction
+        self._build_timer.setInterval(0)
+        self._build_timer.timeout.connect(self._build_chunk)
+        self._search_timer = QTimer(self)         # search debounce
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(_SEARCH_DEBOUNCE)
+        self._search_timer.timeout.connect(self._render)
+
         self._build()
+        QShortcut(QKeySequence.StandardKey.Find, self,
+                  context=Qt.ShortcutContext.WidgetWithChildrenShortcut,
+                  activated=self._focus_search)
 
-    def _build(self):
-        self.setStyleSheet(f"""
-            _GameCard {{
-                background: {COLORS['card']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-            }}
-            _GameCard:hover {{
-                border-color: {COLORS['blue']}88;
-                background: {COLORS['card_hover']};
-            }}
-        """)
+    # ── build ────────────────────────────────────────────────────────────────
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(2, 2, 2, 6)
-        lay.setSpacing(0)
+    def _build(self) -> None:
+        root = vbox(self, (SP["xl"], SP["lg"], SP["xl"], SP["xl"]), SP["lg"])
 
-        # Cover image
-        self._img_lbl = QLabel()
-        self._img_lbl.setFixedSize(CARD_W - 4, IMG_H)
-        self._img_lbl.setObjectName("CardImg")
-        self._img_lbl.setStyleSheet(f"QLabel#CardImg {{ background:{COLORS['card_hover']}; border-radius:6px; }}")
-        self._img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self._img_lbl)
+        # header
+        self._progress = QProgressBar()
+        self._progress.setFixedWidth(140)
+        self._progress.setTextVisible(False)
+        self._progress.hide()
+        self._refresh_btn = Button("", icon="refresh", on_click=self._refresh_prices)
+        self._more_btn = IconButton("ellipsis", "", on_click=self._open_more_menu)
+        self._add_btn = Button("", variant="primary", icon="plus", on_click=self._add_game)
+        self._menu = QMenu(self)
+        self._act_covers = self._menu.addAction(icons.icon("download", C["text"]), "", self._download_covers)
+        self._act_export = self._menu.addAction(icons.icon("file-spreadsheet", C["text"]), "", self._export_excel)
+        self._header = SectionHeader("", "", actions=[self._progress, self._refresh_btn, self._more_btn, self._add_btn])
+        root.addWidget(self._header)
 
-        # Priority badge overlay
-        self._badge = QLabel(self._img_lbl)
-        self._badge.setFixedSize(24, 24)
-        self._badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._badge.setFont(QFont("Space Mono", 10, QFont.Weight.Bold))
-        self._badge.move(CARD_W - 4 - 28, 4)
-        self._badge.setAutoFillBackground(False)
-        self._badge.setStyleSheet("border-radius:4px; color:#000;")
-        self._badge.hide()
-
-        # Info
-        info = QWidget()
-        info.setAutoFillBackground(False)
-        info_lay = QVBoxLayout(info)
-        info_lay.setContentsMargins(6, 4, 6, 0)
-        info_lay.setSpacing(1)
-
-        self._name_lbl = QLabel()
-        self._name_lbl.setFont(QFont("Space Mono", 9, QFont.Weight.Bold))
-        self._name_lbl.setStyleSheet(f"color:{COLORS['text']}; background-color:transparent;")
-        self._name_lbl.setAutoFillBackground(False)
-        self._name_lbl.setWordWrap(True)
-        self._name_lbl.setMaximumWidth(CARD_W - 12)
-        info_lay.addWidget(self._name_lbl)
-
-        self._meta_lbl = QLabel()
-        self._meta_lbl.setFont(QFont("Space Mono", 8))
-        self._meta_lbl.setStyleSheet(f"color:{COLORS['text_dim']}; background-color:transparent;")
-        self._meta_lbl.setAutoFillBackground(False)
-        info_lay.addWidget(self._meta_lbl)
-
-        pr_row = QHBoxLayout()
-        pr_row.setSpacing(4)
-        self._price_lbl = QLabel()
-        self._price_lbl.setFont(QFont("Space Mono", 9, QFont.Weight.Bold))
-        self._price_lbl.setStyleSheet(f"color:{COLORS['text']}; background-color:transparent;")
-        self._price_lbl.setAutoFillBackground(False)
-        pr_row.addWidget(self._price_lbl)
-
-        self._dot_lbl = QLabel()
-        self._dot_lbl.setFont(QFont("Space Mono", 9, QFont.Weight.Bold))
-        self._dot_lbl.setAutoFillBackground(False)
-        pr_row.addStretch()
-        pr_row.addWidget(self._dot_lbl)
-        info_lay.addLayout(pr_row)
-
-        lay.addWidget(info)
-
-    def mousePressEvent(self, event):
-        if self._game and self._on_click:
-            self._on_click(self._game)
-
-    def show_game(self, game: Game):
-        self._game    = game
-        self._visible = True
-
-        # Reset cover to placeholder
-        self._img_lbl.setPixmap(QPixmap())
-        self._img_lbl.setStyleSheet(
-            f"background:{COLORS['card_hover']}; border-radius:6px;")
-
-        # Badge
-        p = game.priority or "C"
-        color = PRIORITY_COLORS.get(p, COLORS["border"])
-        self._badge.setText(p)
-        self._badge.setStyleSheet(
-            f"background:{color}; border-radius:4px; color:#000;")
-        self._badge.show()
-
-        # Name
-        self._name_lbl.setText(game.name or "")
-
-        # Meta
-        _genre = translate_genre(game.genre.split(',')[0].strip()) if game.genre else '—'
-        meta = f"{game.release_year or '—'} · {_genre}"
-        self._meta_lbl.setText(meta)
-
-        # Price
-        if game.price:
-            col = COLORS["green"] if game.price.is_on_sale else COLORS["text"]
-            self._price_lbl.setText(f"${game.price.current:,.0f}")
-            self._price_lbl.setStyleSheet(f"color:{col}; background-color:transparent;")
-        else:
-            self._price_lbl.setText("—")
-            self._price_lbl.setStyleSheet(f"color:{COLORS['text_dim']}; background-color:transparent;")
-
-        # Rec dot
-        rec = game.buy_recommendation
-        if any(x in rec for x in (i18n.t("recommendation.buy_now"), i18n.t("recommendation.near_low"))):
-            dot, dot_c = "✓", COLORS["green"]
-        elif i18n.t("recommendation.near_low") in rec:
-            dot, dot_c = "≈", COLORS["gold"]
-        else:
-            dot, dot_c = "↓", COLORS["text_dim"]
-        self._dot_lbl.setText(dot)
-        self._dot_lbl.setStyleSheet(f"color:{dot_c}; background-color:transparent;")
-
-        self.show()
-
-    def hide_card(self):
-        self._game    = None
-        self._visible = False
-        self.hide()
-
-    def set_image(self, pixmap: QPixmap):
-        if self._visible and self._game and pixmap:
-            scaled = pixmap.scaled(
-                CARD_W - 4, IMG_H,
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self._img_lbl.setPixmap(scaled)
-            self._img_lbl.setStyleSheet("border-radius:6px;")
-
-
-# ── Wishlist view ─────────────────────────────────────────────────────────────
-
-class WishlistView(QFrame):
-
-    def __init__(self, parent=None,
-                 on_game_click: Callable = None,
-                 on_add_game:   Callable = None,
-                 **kwargs):
-        super().__init__(parent)
-        self.on_game_click = on_game_click
-        self.on_add_game   = on_add_game
-
-        self._games: list[Game]       = []
-        self._filter                  = "all"
-        self._search_text             = ""
-        self._last_rendered_ids: list = []
-        self._pool: dict[str, list]   = {}
-        self._row_widgets: list[QWidget] = []
-        self._filter_timer            = QTimer()
-        self._filter_timer.setSingleShot(True)
-        self._filter_timer.setInterval(150)
-        self._filter_timer.timeout.connect(self._apply_filter)
-
-        self._bridge = _Bridge()
-        self._bridge.images_ready.connect(self._apply_images)
-
-        self.setStyleSheet(f"background:{COLORS['bg']};")
-        self._build()
-        self._init_pool()
-
-    # ── Build ─────────────────────────────────────────────────────────────────
-
-    def _build(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        # ── Top bar ───────────────────────────────────────────────
-        topbar = QFrame()
-        topbar.setFixedHeight(52)
-        topbar.setStyleSheet(f"background:{COLORS['panel']}; border:none;")
-        tb = QHBoxLayout(topbar)
-        tb.setContentsMargins(18, 0, 8, 0)
-        tb.setSpacing(8)
-
-        title = QLabel(i18n.t("nav.wishlist"))
-        title.setFont(QFont("Space Mono", 14, QFont.Weight.Bold))
-        title.setStyleSheet(f"color:{COLORS['text']}; background-color:transparent;")
-        tb.addWidget(title)
-
-        self._search = QLineEdit()
-        self._search.setPlaceholderText(i18n.t("actions.search"))
-        self._search.setFixedSize(200, 30)
-        self._search.setStyleSheet(f"""
-            QLineEdit {{
-                background:{COLORS['card']}; color:{COLORS['text']};
-                border:1px solid {COLORS['border']}; border-radius:6px;
-                padding: 0 8px; font-family:'Space Mono'; font-size:11px;
-            }}
-        """)
+        # toolbar
+        self._toolbar = QWidget()
+        tb = vbox(self._toolbar, spacing=SP["sm"])
+        row1 = hbox(spacing=SP["md"])
+        self._search = SearchField("")
+        self._search.setMinimumWidth(260)
+        self._search.setMaximumWidth(380)
+        self._search.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._search.textChanged.connect(self._on_search)
-        tb.addWidget(self._search)
+        row1.addWidget(self._search, 3)
+        self._status_seg = Segmented([(k, "") for k in STATUS_FILTERS], current="all")
+        self._status_seg.changed.connect(self._on_status)
+        row1.addWidget(self._status_seg)
+        row1.addStretch(1)
+        tb.addLayout(row1)
 
-        # Filter buttons
-        self._filter_btns: dict[str, QPushButton] = {}
-        for key, lbl in [("all", i18n.t("filters.all")),
-                          ("S","S"),("A","A"),("B","B"),("C","C"),
-                          ("sale", i18n.t("filters.on_sale")),
-                          ("purchased", i18n.t("filters.purchased"))]:
-            btn = QPushButton(lbl)
-            btn.setFixedHeight(28)
-            btn.setCheckable(True)
-            btn.setChecked(key == "all")
-            btn.setStyleSheet(self._filter_btn_style(key == "all"))
-            btn.clicked.connect(lambda _, k=key: self._set_filter(k))
-            tb.addWidget(btn)
-            self._filter_btns[key] = btn
+        row2 = hbox(spacing=SP["md"])
+        self._prio_chips = ChipGroup([("any", "")] + [(p, p) for p in PRIORITIES], current="any")
+        self._prio_chips.changed.connect(self._on_priority)
+        row2.addWidget(self._prio_chips)
+        row2.addStretch()
+        self._sort_lbl = label("", "muted")
+        row2.addWidget(self._sort_lbl)
+        self._sort_combo = QComboBox()
+        self._sort_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        for k in SORTS:
+            self._sort_combo.addItem("", k)
+        self._sort_combo.currentIndexChanged.connect(self._on_sort)
+        row2.addWidget(self._sort_combo)
+        tb.addLayout(row2)
+        root.addWidget(self._toolbar)
 
-        tb.addStretch()
+        # stats
+        self._stats_row = QWidget()
+        self._stats_grid = QGridLayout(self._stats_row)
+        self._stats_grid.setContentsMargins(0, 0, 0, 0)
+        self._stats_grid.setSpacing(SP["md"])
+        self._st_total = StatCard("", "0", icon="heart", tone="accent")
+        self._st_sale = StatCard("", "0", icon="tag", tone="green")
+        self._st_value = StatCard("", "—", icon="wallet", tone="gold")
+        self._st_low = StatCard("", "0", icon="medal", tone="violet")
+        self._stat_cards = (self._st_total, self._st_sale, self._st_value, self._st_low)
+        self._stat_cols = 0
+        self._place_stats(4)
+        root.addWidget(self._stats_row)
 
-        self._covers_lbl = QLabel("")
-        self._covers_lbl.setStyleSheet(f"color:{COLORS['text_dim']}; background-color:transparent; font-size:10px;")
-        tb.addWidget(self._covers_lbl)
-
-        covers_btn = SteamButton(text=i18n.t("wishlist.covers_btn"), command=self._download_covers,
-                                 style="ghost")
-        covers_btn.setFixedHeight(30)
-        tb.addWidget(covers_btn)
-        self._covers_btn = covers_btn
-
-        prices_btn = SteamButton(text=i18n.t("wishlist.refresh_prices_btn"),
-                                 command=self._refresh_all_prices, style="ghost")
-        prices_btn.setFixedHeight(30)
-        tb.addWidget(prices_btn)
-        self._prices_btn = prices_btn
-
-        export_btn = SteamButton(text=i18n.t("actions.export"),
-                                 command=self._export_excel, style="ghost")
-        export_btn.setFixedHeight(30)
-        tb.addWidget(export_btn)
-
-        add_btn = SteamButton(text=f"+ {i18n.t('actions.add')}",
-                              command=self.on_add_game, style="primary")
-        add_btn.setFixedHeight(30)
-        tb.addWidget(add_btn)
-
-        root.addWidget(topbar)
-
-        # ── Stats row ─────────────────────────────────────────────
-        stats_row = QFrame()
-        stats_row.setStyleSheet(f"background:{COLORS['bg']}; border:none;")
-        sr = QHBoxLayout(stats_row)
-        sr.setContentsMargins(14, 10, 14, 0)
-        sr.setSpacing(6)
-
-        self._stats: dict[str, StatCard] = {}
-        for key, label, icon, accent in [
-            ("total",   i18n.t("stats.total_games"), "◈", COLORS["blue"]),
-            ("value",   i18n.t("stats.total_value"),  "◎", "#94a3b8"),
-            ("savings", i18n.t("stats.savings"),      "↓", COLORS["green"]),
-            ("s_count", i18n.t("stats.priority_s"),   "★", COLORS["gold"]),
-            ("on_sale", i18n.t("stats.on_sale_now"),  "⚡", "#f472b6"),
-        ]:
-            card = StatCard(label=label, value="—", icon=icon, accent=accent)
-            card.setMinimumHeight(68)
-            sr.addWidget(card)
-            self._stats[key] = card
-
-        root.addWidget(stats_row)
-
-        # ── Scroll area ───────────────────────────────────────────
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet(f"""
-            QScrollArea {{ border:none; background:{COLORS['bg']}; }}
-            QScrollBar:vertical {{
-                background:{COLORS['bg']}; width:6px; border:none;
-            }}
-            QScrollBar::handle:vertical {{
-                background:{COLORS['border']}; border-radius:3px; min-height:30px;
-            }}
-            QScrollBar::handle:vertical:hover {{ background:{COLORS['blue']}; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
-        """)
-
+        # grid
         self._content = QWidget()
-        self._content.setStyleSheet(f"background:{COLORS['bg']};")
-        self._content_lay = QVBoxLayout(self._content)
-        self._content_lay.setContentsMargins(14, 10, 14, 10)
-        self._content_lay.setSpacing(0)
+        self._content_lay = vbox(self._content, (0, 0, SP["sm"], 0), SP["sm"])
         self._content_lay.addStretch()
-
-        self._scroll.setWidget(self._content)
+        self._scroll = scroll_area(self._content)
         root.addWidget(self._scroll, 1)
 
-        # Empty label
-        self._empty_lbl = QLabel(i18n.t("wishlist.no_match"))
-        self._empty_lbl.setFont(QFont("Space Mono", 13))
-        self._empty_lbl.setStyleSheet(f"color:{COLORS['text_dim']}; background-color:transparent;")
-        self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_lbl.hide()
-        self._content_lay.insertWidget(0, self._empty_lbl)
+        # empty states
+        self._empty_add_btn = Button("", variant="primary", icon="plus", on_click=self._add_game)
+        self._empty = EmptyState("heart", "", "", action=self._empty_add_btn)
+        self._empty.hide()
+        root.addWidget(self._empty, 1)
+        self._clear_btn = Button("", icon="x", on_click=self.clear_filters)
+        self._no_match = EmptyState("search", "", "", action=self._clear_btn)
+        self._no_match.hide()
+        root.addWidget(self._no_match, 1)
 
-    def _filter_btn_style(self, active: bool) -> str:
-        bg  = COLORS["blue"] if active else "transparent"
-        fg  = "#000" if active else COLORS["text_dim"]
-        return f"""
-            QPushButton {{
-                background:{bg}; color:{fg};
-                border:1px solid {COLORS['border']};
-                border-radius:5px; font-family:'Space Mono';
-                font-size:11px; padding:2px 8px; min-height:28px;
-            }}
-            QPushButton:hover {{ background:{COLORS['card_hover']}; color:{COLORS['text']}; }}
-        """
+        self.retranslate()
 
-    # ── Card pool ─────────────────────────────────────────────────────────────
-
-    def _init_pool(self):
-        """Pre-create card pool for all priorities."""
-        for p in ("S", "A", "B", "C"):
-            cards = []
-            for _ in range(MAX_ROWS * COLS):
-                card = _GameCard(on_click=self.on_game_click)
-                card.hide_card()
-                cards.append(card)
-            self._pool[p] = cards
-
-    # ── Data ──────────────────────────────────────────────────────────────────
-
-    def refresh(self, force: bool = False):
-        self._games = repo.get_all()
-        print("Wishlist refreshed")
-        print(f"Games loaded: {len(self._games)}")
-        self._update_stats()
-        # Include status and len so any add/remove/status-change forces re-render.
-        # status is included so "Purchased" games that change status also update.
-        new_ids = [(g.id, g.priority, g.status, g.cover_path,
-                    g.price.current if g.price else 0) for g in self._games]
-        if force or new_ids != self._last_rendered_ids:
-            self._last_rendered_ids = new_ids
-            # Always run _apply_filter on main thread.
-            # If we're already on the main thread this is a direct call;
-            # if called from a background thread the QTimer ensures safety.
-            QTimer.singleShot(0, self._apply_filter)
-
-    def reload_after_change(self):
-        """
-        Call this after any action that adds, removes, or changes a game
-        (Add Game, Import Wishlist, Mark Purchased, Mark Wishlist, Delete
-        Game, Change Priority). Forces a full re-fetch from the repository
-        and an immediate re-render, regardless of whether the cached
-        "rendered ids" snapshot looks unchanged.
-        """
-        self._last_rendered_ids = []
-        self.refresh(force=True)
-
-    def _update_stats(self):
-        games    = self._games
-        total    = len(games)
-        on_sale  = sum(1 for g in games if g.price and g.price.is_on_sale)
-        s_count  = sum(1 for g in games if g.priority == "S")
-        currency = next((g.price.currency for g in games if g.price), "")
-        total_v  = sum(g.price.current for g in games if g.price)
-        savings  = sum(g.price.base - g.price.current
-                       for g in games
-                       if g.price and g.price.is_on_sale
-                       and g.price.base > g.price.current)
-        self._stats["total"].set_value(str(total))
-        self._stats["value"].set_value(
-            f"${total_v:,.0f}{' '+currency if currency else ''}")
-        self._stats["savings"].set_value(f"${savings:,.0f}")
-        self._stats["s_count"].set_value(str(s_count))
-        self._stats["on_sale"].set_value(str(on_sale))
-
-    # ── Filter ────────────────────────────────────────────────────────────────
-
-    def _on_search(self, text: str):
-        self._search_text = text.lower()
-        self._filter_timer.start()
-
-    def _set_filter(self, key: str):
-        self._filter = key
-        for k, btn in self._filter_btns.items():
-            active = k == key
-            btn.setChecked(active)
-            btn.setStyleSheet(self._filter_btn_style(active))
-        self._apply_filter()
-
-    # Status comparisons now go through data.status.normalize_status() —
-    # see that module for why we never compare g.status to a literal string.
-
-    def _apply_filter(self):
-        if self._filter == "purchased":
-            # Show ONLY purchased games — the inverse of the main wishlist grid.
-            # normalize_status() maps legacy/translated status strings (from
-            # older app versions) back to the canonical STATUS_PURCHASED, so
-            # those games still appear here instead of vanishing entirely.
-            games = [g for g in self._games
-                     if normalize_status(g.status) == STATUS_PURCHASED]
-        else:
-            # Exclude purchased games from the main grid. Anything that
-            # normalizes to a non-purchased status — including unrecognized
-            # or corrupted status strings, which normalize_status() defaults
-            # to Wishlist rather than silently dropping — is shown here.
-            games = [g for g in self._games
-                     if normalize_status(g.status) != STATUS_PURCHASED]
-            if self._filter == "sale":
-                games = [g for g in games if g.price and g.price.is_on_sale]
-            elif self._filter in ("S","A","B","C"):
-                games = [g for g in games if g.priority == self._filter]
-        if self._search_text:
-            q = self._search_text
-            games = [g for g in games
-                     if q in g.name.lower() or q in g.genre.lower()]
-        self._layout(games)
-
-    # ── Layout ────────────────────────────────────────────────────────────────
-
-    def _layout(self, games: list[Game]):
-        """Assign games to card pool — no widget creation."""
-        has_any = bool(games)
-        self._empty_lbl.setVisible(not has_any)
-
-        images_to_load: list = []
-
-        # Hide all cards and detach them from their current row widget.
-        # Must happen BEFORE deleting old row widgets below, since the cards
-        # are pooled/reused across layouts — if we deleteLater() a row while
-        # a pooled card is still its child, Qt destroys the card with it.
-        for p_cards in self._pool.values():
-            for card in p_cards:
-                card.hide_card()
-                card.setParent(None)
-
-        # Remove + fully delete row widgets created by the previous _layout()
-        # call. Previously these were left orphaned in _content_lay, causing
-        # stale rows, leftover/duplicate cards, and games that wouldn't
-        # appear/disappear without an app restart.
-        for row in self._row_widgets:
-            self._content_lay.removeWidget(row)
-            row.setParent(None)
-            row.deleteLater()
-        self._row_widgets = []
-
-        # Clear old section widgets
-        for attr in [f"_sec_{p}" for p in "SABC"]:
-            if hasattr(self, attr):
-                w = getattr(self, attr)
-                self._content_lay.removeWidget(w)
-                w.hide()
-
-        insert_pos = 1  # after empty_lbl
-
-        for priority in ("S", "A", "B", "C"):
-            group = [g for g in games if g.priority == priority]
-            if not group:
-                continue
-
-            # Section header
-            attr = f"_sec_{priority}"
-            if not hasattr(self, attr):
-                lbl = QLabel(i18n.t(f"priority.{priority}"))
-                lbl.setFont(QFont("Space Mono", 11, QFont.Weight.Bold))
-                color = PRIORITY_COLORS.get(priority, COLORS["text_dim"])
-                lbl.setStyleSheet(
-                    f"color:{color}; padding:8px 0 4px 0; background-color:transparent;")
-                setattr(self, attr, lbl)
-            sec_lbl = getattr(self, attr)
-            self._content_lay.insertWidget(insert_pos, sec_lbl)
-            sec_lbl.show()
-            insert_pos += 1
-
-            # Grid rows
-            pool    = self._pool[priority]
-            pool_i  = 0
-            row_w   = None
-
-            for gi, game in enumerate(group[:MAX_ROWS * COLS]):
-                col = gi % COLS
-                if col == 0:
-                    row_w = QWidget()
-                    row_w.setAutoFillBackground(False)
-                    row_lay = QHBoxLayout(row_w)
-                    row_lay.setContentsMargins(0, 0, 0, 4)
-                    row_lay.setSpacing(8)
-                    row_lay.setAlignment(Qt.AlignmentFlag.AlignLeft)
-                    self._content_lay.insertWidget(insert_pos, row_w)
-                    self._row_widgets.append(row_w)
-                    insert_pos += 1
-
-                if pool_i < len(pool):
-                    card = pool[pool_i]
-                    pool_i += 1
-                    card.setParent(row_w)
-                    row_w.layout().addWidget(card)
-                    card.show_game(game)
-                    if game.cover_path:
-                        images_to_load.append((card, game.cover_path))
-
-            # Always add stretch to last row so cards align left
-            if row_w and group:
-                row_w.layout().addStretch(1)
-
-        # Load images in background
-        if images_to_load:
-            QTimer.singleShot(10, lambda imgs=images_to_load:
-                              self._load_images_bg(imgs))
-
-    def _load_images_bg(self, items: list):
-        """Load cover images in background thread, update on main thread."""
-        def _work():
-            results = []
-            for card, path in items:
-                try:
-                    from pathlib import Path as _P
-                    if path and _P(path).exists():
-                        px = QPixmap(path)
-                        if not px.isNull():
-                            results.append((card, px))
-                except Exception:
-                    pass
-            if results:
-                self._bridge.images_ready.emit(results)
-
-        threading.Thread(target=_work, daemon=True).start()
-
-    def _apply_images(self, results: list):
-        for card, pixmap in results:
-            card.set_image(pixmap)
-
-    # ── Actions ───────────────────────────────────────────────────────────────
-
-    def _download_covers(self):
-        from services.steamgriddb import download_all_missing, cover_exists
-        from ui.settings_loader import get_settings
-        # Re-pull from the repository before counting "missing" — self._games
-        # can be stale if games were added/synced from another view (e.g.
-        # the Settings wishlist sync) since this view was last refreshed.
-        self._games = repo.get_all()
-        settings = get_settings()
-        missing  = sum(1 for g in self._games if not cover_exists(g.app_id))
-        if missing == 0:
-            self._covers_lbl.setText(i18n.t("wishlist.covers_all_done"))
-            self._covers_lbl.setStyleSheet(f"color:{COLORS['green']}; background-color:transparent; font-size:10px;")
-            QTimer.singleShot(3000, lambda: self._covers_lbl.setText(""))
+    def _place_stats(self, cols: int) -> None:
+        """Lay the stat tiles out in `cols` columns (4 wide, 2 × 2 when narrow)."""
+        if cols == self._stat_cols:
             return
-        self._covers_btn.setEnabled(False)
-        self._covers_lbl.setText(f"0/{missing}")
+        self._stat_cols = cols
+        for card in self._stat_cards:
+            self._stats_grid.removeWidget(card)
+        for c in range(4):
+            self._stats_grid.setColumnStretch(c, 1 if c < cols else 0)
+        for i, card in enumerate(self._stat_cards):
+            self._stats_grid.addWidget(card, i // cols, i % cols)
 
-        def _prog(cur, tot, _name):
-            QTimer.singleShot(0, lambda c=cur,t=tot:
-                self._covers_lbl.setText(f"{c}/{t}"))
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place_stats(4 if event.size().width() >= _STATS_4COL_MIN else 2)
 
-        def _done(dl, fail):
-            def _upd():
-                self._covers_btn.setEnabled(True)
-                self._covers_lbl.setText(
-                    i18n.t("wishlist.covers_ok").format(dl=dl) if not fail else i18n.t("wishlist.covers_result").format(dl=dl, fail=fail))
-                from ui.image_cache import clear
-                clear()
-                self._last_rendered_ids = []
-                self.refresh()
-                QTimer.singleShot(4000, lambda: self._covers_lbl.setText(""))
-            QTimer.singleShot(0, _upd)
+    # ── shell contract ───────────────────────────────────────────────────────
 
-        download_all_missing(
-            self._games, settings.get("steamgriddb_key",""),
-            on_progress=_prog, on_done=_done, max_workers=4,
-        )
+    def refresh(self, force: bool = False) -> None:
+        """Reload games from the repository and re-render (force is a no-op here:
+        nothing in this view is cached beyond the repository's own cache)."""
+        self._games = repo.get_all()
+        self._update_stats()
+        self._render()
 
-    def _refresh_all_prices(self):
+    def retranslate(self) -> None:
+        t = i18n.t
+        self._header.title.setText(t("nav.wishlist"))
+        self._refresh_btn.setText(t("actions.refresh"))
+        self._add_btn.setText(t("actions.add"))
+        self._empty_add_btn.setText(t("actions.add"))
+        self._more_btn.setToolTip(t("wishlist.more"))
+        self._more_btn.setAccessibleName(t("wishlist.more"))
+        self._act_covers.setText(t("wishlist.download_covers"))
+        self._act_export.setText(t("actions.export"))
+        self._search.setPlaceholderText(t("wishlist.search_placeholder"))
+        for key, lk in (("all", "filters.all"), ("sa", "filters.priority_sa"),
+                        ("sale", "filters.on_sale"), ("purchased", "filters.purchased")):
+            self._status_seg.set_label(key, t(lk))
+        self._prio_chips.set_label("any", t("wishlist.any_priority"))
+        self._sort_lbl.setText(t("wishlist.sort_label"))
+        for i, k in enumerate(SORTS):
+            self._sort_combo.setItemText(i, t(f"wishlist.sort_{k}"))
+        self._st_total.set_title(t("wishlist.stat_games"))
+        self._st_sale.set_title(t("stats.on_sale_now"))
+        self._st_value.set_title(t("wishlist.stat_value"))
+        self._st_low.set_title(t("wishlist.stat_low"))
+        self._empty.title.setText(t("wishlist.empty_title"))
+        self._empty.subtitle.setText(t("wishlist.empty_subtitle"))
+        self._empty.subtitle.setVisible(True)
+        self._no_match.title.setText(t("wishlist.no_match_title"))
+        self._no_match.subtitle.setText(t("wishlist.no_match_subtitle"))
+        self._no_match.subtitle.setVisible(True)
+        self._clear_btn.setText(t("wishlist.clear_filters"))
+        for p, hdr in self._group_headers.items():
+            hdr.title.setText(self._group_title(p))
+        if self._games:
+            self._update_stats(animate=False)
+            self._update_subtitle(self._filtered())
+
+    # ── filters ──────────────────────────────────────────────────────────────
+
+    def clear_filters(self) -> None:
+        """Reset search, status and priority filters (sort is kept)."""
+        self._query = ""
+        self._status = "all"
+        self._priority = "any"
+        self._search.blockSignals(True)
+        self._search.clear()
+        self._search.blockSignals(False)
+        self._status_seg.set_current("all", emit=False)
+        self._prio_chips.set_current("any", emit=False)
+        self._render()
+
+    def _focus_search(self) -> None:
+        self._search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._search.selectAll()
+
+    def _on_search(self, text: str) -> None:
+        self._query = text.strip().casefold()
+        self._search_timer.start()
+
+    def _on_status(self, key: str) -> None:
+        self._status = key
+        self._render()
+
+    def _on_priority(self, key: str) -> None:
+        self._priority = key
+        self._render()
+
+    def _on_sort(self, index: int) -> None:
+        self._sort = self._sort_combo.itemData(index) or "priority"
+        self._render()
+
+    def _filtered(self) -> list[Game]:
+        games = self._games
+        if self._status == "purchased":
+            games = [g for g in games if _is_purchased(g)]
+        else:
+            games = [g for g in games if not _is_purchased(g)]
+            if self._status == "sa":
+                games = [g for g in games if g.priority in ("S", "A")]
+            elif self._status == "sale":
+                games = [g for g in games if _on_sale(g)]
+        if self._priority in PRIORITIES:
+            games = [g for g in games if g.priority == self._priority]
+        if self._query:
+            q = self._query
+            games = [g for g in games
+                     if q in (g.name or "").casefold() or q in (g.developer or "").casefold()
+                     or q in (g.genre or "").casefold()]
+        return games
+
+    def _sorted(self, games: list[Game]) -> list[Game]:
+        s = self._sort
+        if s == "name" or s == "priority":
+            return sorted(games, key=lambda g: (g.name or "").casefold())
+        if s == "price":
+            return sorted(games, key=lambda g: (g.price is None, g.price.current if g.price else 0.0,
+                                                (g.name or "").casefold()))
+        if s == "discount":
+            return sorted(games, key=lambda g: (-(g.price.discount_pct if _on_sale(g) else 0),
+                                                (g.name or "").casefold()))
+        if s == "added":
+            return sorted(games, key=lambda g: (g.date_added or "", (g.name or "").casefold()), reverse=True)
+        return games
+
+    # ── render ───────────────────────────────────────────────────────────────
+
+    def _render(self) -> None:
+        """Rebuild the grid for the current filter; cards are created in chunks."""
+        self._generation += 1
+        self._pending.clear()
+        self._build_timer.stop()
+        self._group_headers.clear()
+        # drop everything but the trailing stretch
+        while self._content_lay.count() > 1:
+            item = self._content_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+            elif item.layout() is not None:
+                clear_layout(item.layout())
+
+        has_games = bool(self._games)
+        shown = self._sorted(self._filtered()) if has_games else []
+        self._update_subtitle(shown)
+
+        self._toolbar.setVisible(has_games)
+        self._stats_row.setVisible(has_games)
+        if not self._busy:
+            self._refresh_btn.setEnabled(has_games)
+        self._empty.setVisible(not has_games)
+        self._no_match.setVisible(has_games and not shown)
+        self._scroll.setVisible(bool(shown))
+        if not shown:
+            return
+
+        if self._sort == "priority":
+            for p in PRIORITIES:
+                group = [g for g in shown if g.priority == p]
+                if not group:
+                    continue
+                count = label(i18n.t("wishlist.games_one" if len(group) == 1 else "wishlist.games_other",
+                                     n=len(group)), "muted")
+                hdr = SubHeader(self._group_title(p), trailing=count)
+                hdr.layout().insertWidget(0, PriorityBadge(p))
+                self._group_headers[p] = hdr
+                self._content_lay.insertWidget(self._content_lay.count() - 1, hdr)
+                self._add_grid(group)
+        else:
+            self._add_grid(shown)
+        self._build_chunk()
+        if self._pending:
+            self._build_timer.start()
+
+    def _add_grid(self, games: list[Game]) -> None:
+        host = QWidget()
+        flow = FlowLayout(host, SP["md"], SP["md"])
+        self._content_lay.insertWidget(self._content_lay.count() - 1, host)
+        for g in games:
+            self._pending.append((flow, g))
+
+    def _build_chunk(self) -> None:
+        gen = self._generation
+        self._content.setUpdatesEnabled(False)
+        try:
+            for _ in range(_CHUNK):
+                if not self._pending or gen != self._generation:
+                    break
+                flow, game = self._pending.popleft()
+                flow.addWidget(GameCard(game, on_click=self._on_game_click))
+        finally:
+            self._content.setUpdatesEnabled(True)
+        if not self._pending:
+            self._build_timer.stop()
+
+    def _group_title(self, p: str) -> str:
+        raw = i18n.t(f"priority.{p}")
+        return _PRIO_PREFIX.sub("", raw) or raw
+
+    # ── stats ────────────────────────────────────────────────────────────────
+
+    def _update_subtitle(self, shown: list[Game]) -> None:
+        wish = [g for g in self._games if not _is_purchased(g)]
+        n, sale = len(wish), sum(1 for g in wish if _on_sale(g))
+        bits = []
+        if self._games and len(shown) != n:
+            bits.append(i18n.t("wishlist.showing", shown=len(shown), n=n))
+        else:
+            bits.append(i18n.t("wishlist.games_one" if n == 1 else "wishlist.games_other", n=n))
+        if sale:
+            bits.append(i18n.t("wishlist.on_sale_count", n=sale))
+        self._header.subtitle.setText(" · ".join(bits))
+        self._header.subtitle.setVisible(True)
+
+    def _update_stats(self, animate: bool = True) -> None:
+        wish = [g for g in self._games if not _is_purchased(g)]
+        purchased = len(self._games) - len(wish)
+        cur = _dominant_currency(wish)
+        priced = [g for g in wish if g.price is not None and g.price.currency == cur]
+        on_sale = sum(1 for g in wish if _on_sale(g))
+        total_value = sum(g.price.current for g in priced)
+        savings = sum(max(0.0, g.price.base - g.price.current) for g in priced if _on_sale(g))
+        at_low = sum(1 for g in wish if _at_low(g))
+        t = i18n.t
+
+        self._st_total.set_value(len(wish), animate=animate)
+        self._st_total.set_caption(t("wishlist.purchased_caption", n=purchased))
+        self._st_sale.set_value(on_sale, animate=animate)
+        self._st_sale.set_caption(t("wishlist.sale_caption", pct=pct(100 * on_sale / len(wish))) if wish else "")
+        self._st_value.set_value(total_value, fmt=lambda v: _money_fit(v, cur), animate=animate)
+        self._st_value.set_caption(t("wishlist.value_caption", saved=money(savings, cur)) if savings > 0
+                                   else t("wishlist.no_savings"))
+        self._st_low.set_value(at_low, animate=animate)
+        self._st_low.set_caption(t("wishlist.low_caption"))
+
+    # ── actions ──────────────────────────────────────────────────────────────
+
+    def _add_game(self) -> None:
+        if self._on_add_game:
+            self._on_add_game()
+
+    def _open_more_menu(self) -> None:
+        self._menu.exec(self._more_btn.mapToGlobal(self._more_btn.rect().bottomLeft()))
+
+    def _notify(self, message: str, tone: str = "info") -> None:
+        fn = self._notify_dep or getattr(self.window(), "notify", None)
+        if fn:
+            fn(message, tone)
+
+    def _data_changed(self) -> None:
+        fn = self._data_changed_dep or getattr(self.window(), "on_data_changed", None)
+        if fn:
+            fn()
+        else:
+            self.refresh(force=True)
+
+    def _set_busy(self, busy: bool, text: Optional[str] = None) -> None:
+        self._busy = busy
+        self._refresh_btn.set_loading(busy, text)
+        self._more_btn.setEnabled(not busy)
+        self._progress.setVisible(busy)
+        if busy:
+            self._progress.setRange(0, 0)
+
+    def _on_progress(self, step: tuple) -> None:
+        cur, total, key = step
+        if total:
+            self._progress.setRange(0, total)
+            self._progress.setValue(cur)
+        self._refresh_btn.setText(i18n.t(key, cur=cur, total=total))
+
+    def _refresh_prices(self) -> None:
+        """Bulk price refresh through run_async; bulk_refresh_prices spawns its
+        own workers and reports via callbacks, so the job waits for on_done."""
+        if self._busy:
+            return
         from services.steam_api import bulk_refresh_prices
         from ui.settings_loader import get_settings
-        # Always re-pull from disk first — same staleness concern as covers.
-        self._games = repo.get_all()
-        settings = get_settings()
-        country  = settings.get("country", "mx")
-        total    = len(self._games)
-        if total == 0:
+        games = repo.get_all()
+        if not games:
             return
+        country = get_settings().get("country", "us")
+        self._set_busy(True, i18n.t("wishlist.refreshing", cur=0, total=len(games)))
 
-        self._prices_btn.setEnabled(False)
-        self._covers_lbl.setText(f"0/{total}")
+        def work(progress):
+            done = threading.Event()
+            box: dict = {}
 
-        def _prog(cur, tot, _name):
-            QTimer.singleShot(0, lambda c=cur, t=tot:
-                self._covers_lbl.setText(f"{c}/{t}"))
+            def _done(updated, unchanged, failed):
+                box["r"] = (updated, unchanged, failed)
+                done.set()
 
-        def _done(updated, unchanged, failed):
-            def _upd():
-                self._prices_btn.setEnabled(True)
-                self._covers_lbl.setText(
-                    i18n.t("wishlist.prices_updated").format(n=updated)
-                    if not failed else
-                    i18n.t("wishlist.prices_updated_with_errors").format(n=updated, fail=failed))
-                self._last_rendered_ids = []
-                self.refresh(force=True)
-                QTimer.singleShot(4000, lambda: self._covers_lbl.setText(""))
-            QTimer.singleShot(0, _upd)
+            bulk_refresh_prices(games, country=country,
+                                on_progress=lambda c, t, _n: progress((c, t, "wishlist.refreshing")),
+                                on_done=_done, max_workers=6)
+            done.wait()
+            return box["r"]
 
-        bulk_refresh_prices(
-            self._games, country=country,
-            on_progress=_prog, on_done=_done, max_workers=6,
-        )
+        def on_done(result):
+            self._set_busy(False)
+            if isinstance(result, Exception):
+                self._notify(i18n.t("wishlist.refresh_failed", msg=str(result)), "error")
+                return
+            updated, _unchanged, failed = result
+            if failed:
+                self._notify(i18n.t("wishlist.refresh_done_errors", n=updated, fail=failed), "warning")
+            else:
+                self._notify(i18n.t("wishlist.refresh_done", n=updated), "success")
+            self._data_changed()
 
-    def _export_excel(self):
-        import threading
+        run_async(self, work, on_done=on_done, on_progress=self._on_progress)
+
+    def _download_covers(self) -> None:
+        if self._busy:
+            return
+        from services.steamgriddb import cover_exists, download_all_missing
+        from ui.settings_loader import get_settings
+        games = repo.get_all()
+        missing = sum(1 for g in games if not cover_exists(g.app_id))
+        if missing == 0:
+            self._notify(i18n.t("wishlist.covers_none"), "info")
+            return
+        api_key = get_settings().get("steamgriddb_key", "") or ""
+        self._set_busy(True, i18n.t("wishlist.covers_progress", cur=0, total=missing))
+
+        def work(progress):
+            done = threading.Event()
+            box: dict = {}
+
+            def _done(downloaded, failed):
+                box["r"] = (downloaded, failed)
+                done.set()
+
+            download_all_missing(games, api_key,
+                                 on_progress=lambda c, t, _n: progress((c, t, "wishlist.covers_progress")),
+                                 on_done=_done, max_workers=4)
+            done.wait()
+            return box["r"]
+
+        def on_done(result):
+            self._set_busy(False)
+            if isinstance(result, Exception):
+                self._notify(i18n.t("wishlist.covers_failed", msg=str(result)), "error")
+                return
+            downloaded, failed = result
+            from ui import image_cache
+            image_cache.clear()
+            if failed:
+                self._notify(i18n.t("wishlist.covers_done_errors", n=downloaded, fail=failed), "warning")
+            else:
+                self._notify(i18n.t("wishlist.covers_done", n=downloaded), "success")
+            self._data_changed()
+
+        run_async(self, work, on_done=on_done, on_progress=self._on_progress)
+
+    def _export_excel(self) -> None:
         from data.excel_manager import export_excel
-        threading.Thread(target=export_excel, daemon=True).start()
+
+        def on_done(result):
+            if isinstance(result, Exception):
+                self._notify(i18n.t("wishlist.export_failed", msg=str(result)), "error")
+            else:
+                self._notify(i18n.t("wishlist.export_done", path=str(result)), "success")
+
+        run_async(self, export_excel, on_done=on_done)

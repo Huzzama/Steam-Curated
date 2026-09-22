@@ -11,12 +11,14 @@ MODE B — Local OAuth (fallback, for dev / self-hosted)
   Opens browser for OAuth on first run.
 """
 import io
-import json
+import logging
 import threading
 from pathlib import Path
 from typing import Optional, Callable
 
 from config import BASE_DIR
+
+log = logging.getLogger("curator.drive")
 
 CLIENT_SECRET_PATH = BASE_DIR / "client_secret.json"
 TOKEN_PATH         = BASE_DIR / "token.json"
@@ -24,51 +26,27 @@ SETTINGS_PATH      = BASE_DIR / "settings.json"
 
 SCOPES            = ["https://www.googleapis.com/auth/drive.file"]
 DRIVE_FOLDER_NAME = "Steam Curator"
-SYNC_FILES        = ["wishlist.json", "settings.json", "purchases.json"]
+SYNC_FILES        = ["wishlist.json", "purchases.json"]   # never the token/creds
 
 
 # ── Auth mode detection ───────────────────────────────────────────────────────
 
 def _get_steamkustom_token() -> Optional[str]:
-    """Return JWT from settings.json if user logged in via pimpmysteam.com."""
-    try:
-        if SETTINGS_PATH.exists():
-            with open(SETTINGS_PATH, encoding="utf-8") as f:
-                data = json.load(f)
-            return data.get("steamkustom_token")
-    except Exception:
-        pass
-    return None
-
-
-def _get_api_url() -> str:
-    try:
-        if SETTINGS_PATH.exists():
-            with open(SETTINGS_PATH) as f:
-                data = json.load(f)
-            return data.get("api_url", "https://api.pimpmysteam.com")
-    except Exception:
-        pass
-    return "https://api.pimpmysteam.com"
+    """The PimpMySteam app token — single source of truth in steamkustom_auth."""
+    from services.steamkustom_auth import get_token
+    return get_token()
 
 
 def _fetch_drive_token_from_api() -> Optional[str]:
-    """Ask our backend for a Google Drive access token using the user's JWT."""
-    import requests
-    jwt    = _get_steamkustom_token()
-    if not jwt:
+    """Ask our backend for a Google Drive access token using the app token."""
+    from services.steamkustom_auth import api, ApiError, Unreachable
+    if not _get_steamkustom_token():
         return None
     try:
-        resp = requests.get(
-            f"{_get_api_url()}/google/drive-token",
-            headers={"Authorization": f"Bearer {jwt}"},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            return resp.json().get("access_token")
-    except Exception:
-        pass
-    return None
+        return api("/google/drive-token", timeout=10).get("access_token")
+    except (ApiError, Unreachable) as e:
+        log.info("drive-token unavailable: %s", e)
+        return None
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -256,4 +234,4 @@ def get_sync_status() -> dict:
         "authenticated": is_authenticated(),
         "mode":          "api" if jwt else "local",
         "has_jwt":       bool(jwt),
-    }
+    }

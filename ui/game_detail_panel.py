@@ -1,763 +1,747 @@
-import threading
-import webbrowser
-import subprocess
-import sys
-from typing import Optional, Callable
+"""
+GameDetailPanel — the 340 px slide-in panel on the right of the shell.
 
-from PySide6.QtWidgets import (
-    QFrame, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QTextEdit, QProgressBar,
-)
-from PySide6.QtCore import Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QFont, QPixmap
+    panel = GameDetailPanel(parent, on_close=shell.close_detail, on_refresh=shell.on_data_changed)
+    panel.load_game(game)      # show a game (regions are fetched once per app_id)
+    panel.reload()             # re-read the game from the repository and re-render in place
+    panel.retranslate()        # update visible strings after a locale change
 
-from config import COLORS, PRIORITY_OPTIONS, PRIORITY_COLORS
-from data.models import Game
-import data.repository as repo
-import services.steam_api as steam
-import services.steamgriddb as sgdb
-from ui.settings_loader import get_settings
+The widget tree is built once; `_apply(game)` updates it in place so edits
+(priority, rating, notes…) never rebuild the panel or reset the scroll.
+Network work (price refresh, region comparison, cover download) goes through
+`run_async`; the region table shows Skeleton rows meanwhile.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Callable, Optional
+
+from PySide6.QtCore import QEvent, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtWidgets import QComboBox, QLabel, QMessageBox, QPlainTextEdit, QWidget
+
 import i18n
+from config import PRIORITY_OPTIONS
+from data import purchase_repository as purchases
+from data import repository as repo
+from data.models import Game, PriceInfo
+from data.status import STATUS_ARCHIVED, STATUS_PURCHASED
+from ui import icons, image_cache
+from ui.animations import clear_layout
+from services.price_history import merge as price_history_merge
+from ui.async_bridge import run_async
+from ui.components import (Button, Card, CoverImage, Divider, IconButton, Pill, Segmented,
+                           Skeleton, hbox, label, scroll_area, vbox)
+from ui.format import day, discount, money
+from ui.settings_loader import get_settings
+from ui.theme import C, SP
+
+log = logging.getLogger("curator.detail")
+
+PANEL_WIDTH = 340
+COVER_W, COVER_H = 90, 135
+_PLAY_STATUSES = ["", "playing", "completed", "on_hold", "abandoned"]
+_MAX_RATING = 5
+
+# Rough USD equivalents so regional prices can be ranked ("Cheapest") without
+# a currency API. A "cheap vs expensive" signal only — never shown as money.
+_USD_RATES = {
+    "USD": 1.0, "MXN": 0.050, "BRL": 0.18, "JPY": 0.0065, "EUR": 1.08, "GBP": 1.27,
+    "CAD": 0.73, "AUD": 0.64, "RUB": 0.011, "TRY": 0.028, "KRW": 0.00073, "CNY": 0.138,
+    "PLN": 0.25, "CZK": 0.044, "HUF": 0.0027, "NOK": 0.094, "SEK": 0.095, "DKK": 0.145,
+    "CHF": 1.12, "NZD": 0.60, "SGD": 0.74, "HKD": 0.128, "TWD": 0.031, "THB": 0.028,
+    "INR": 0.012, "CLP": 0.00105, "COP": 0.00024, "PEN": 0.27, "ARS": 0.00095, "UAH": 0.024,
+}
+
+# recommendation verdict → (tone colour, icon, i18n key)
+_VERDICT = {
+    "buy_now":   (C["green"],    "badge-check", "recommendation.buy_now"),
+    "good_deal": (C["accent"],   "tag",         "recommendation.good_deal"),
+    "wait":      (C["gold"],     "hourglass",   "recommendation.wait"),
+    "no_data":   (C["text_dim"], "info",        "recommendation.no_data"),
+}
+_VERDICT_TONE = {"buy_now": "green", "good_deal": "accent", "wait": "gold", "no_data": "neutral"}
 
 
-def open_steam_page(app_id: str, fallback_url: str):
-    steam_url = f"steam://store/{app_id}"
-    try:
-        if sys.platform == "darwin":
-            subprocess.Popen(["open", steam_url])
-        elif sys.platform == "win32":
-            subprocess.Popen(["start", steam_url], shell=True)
-        else:
-            subprocess.Popen(["xdg-open", steam_url])
-    except Exception:
-        webbrowser.open(fallback_url)
+def _icon_label(name: str, color: str, size: int = 14) -> QLabel:
+    lbl = QLabel()
+    lbl.setPixmap(icons.pixmap(name, color, size))
+    lbl.setFixedSize(size, size)
+    return lbl
 
 
-class _Sig(QObject):
-    reload      = Signal(object)        # Game
-    price_data  = Signal(str, object)   # (cc, PriceInfo|None)
+def _to_usd(p: Optional[PriceInfo]) -> Optional[float]:
+    if not p:
+        return None
+    rate = _USD_RATES.get((p.currency or "").upper())
+    return None if rate is None else p.current * rate
 
 
-def _lbl(text, size=10, bold=False, color=None, wrap=0):
-    l = QLabel(text)
-    f = QFont("Space Mono", size)
-    if bold: f.setBold(True)
-    l.setFont(f)
-    l.setStyleSheet(f"color:{color or COLORS['text']};")
-    if wrap: l.setWordWrap(True)
-    return l
+class GameDetailPanel(QWidget):
+    """Slide-in detail panel: cover · price · regions · editable fields · actions."""
 
-
-def _divider():
-    f = QFrame()
-    f.setFrameShape(QFrame.Shape.HLine)
-    f.setStyleSheet(f"color:{COLORS['border']}; margin:8px 12px;")
-    return f
-
-
-def _ghost_btn(text, command=None, danger=False):
-    btn = QPushButton(text)
-    btn.setFixedHeight(30)
-    border = "#4a1515" if danger else COLORS["border"]
-    fg     = COLORS["red"] if danger else COLORS["text_dim"]
-    hover  = "#2a0a0a" if danger else COLORS["card_hover"]
-    btn.setStyleSheet(f"""
-        QPushButton {{
-            background:transparent; color:{fg};
-            border:1px solid {border}; border-radius:6px;
-            font-family:'Space Mono'; font-size:10px;
-            padding:0 8px;
-        }}
-        QPushButton:hover {{ background:{hover}; }}
-    """)
-    if command:
-        btn.clicked.connect(command)
-    return btn
-
-
-class GameDetailPanel(QFrame):
-
-    def __init__(self, parent=None,
-                 on_close: Callable = None,
-                 on_refresh: Callable = None, **kwargs):
+    def __init__(self, parent=None, on_close: Optional[Callable] = None,
+                 on_refresh: Optional[Callable] = None, **deps):
         super().__init__(parent)
-        self.on_close   = on_close   or (lambda: None)
-        self.on_refresh = on_refresh or (lambda: None)
+        self._on_close = on_close or (lambda: None)
+        self._on_refresh = on_refresh or (lambda: None)
+        self._notify_dep: Optional[Callable] = deps.get("notify")
         self._game: Optional[Game] = None
-        self._sig = _Sig()
-        self._sig.reload.connect(self.load_game)
+        self._region_cache: dict[str, dict[str, Optional[PriceInfo]]] = {}
+        self._region_order: list[str] = []
+        self._refreshing = False
+        self._hist_pending: set[str] = set()
+        self.setFixedWidth(PANEL_WIDTH)
+        self._build()
+        self.retranslate()
 
-        self.setStyleSheet(f"""
-            GameDetailPanel {{
-                background:{COLORS['panel']};
-                border-left:1px solid {COLORS['border']};
-            }}
-        """)
-        self._build_shell()
+    # ── build (once) ─────────────────────────────────────────────────────────
 
-    def _build_shell(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+    def _build(self) -> None:
+        root = vbox(self, (0, 0, 0, 0), 0)
 
-        # Top bar
-        topbar = QFrame()
-        topbar.setFixedHeight(42)
-        topbar.setStyleSheet(f"background:{COLORS['bg']}; border:none;")
-        tb = QHBoxLayout(topbar)
-        tb.setContentsMargins(12, 0, 6, 0)
+        # top bar
+        top = QWidget()
+        top.setFixedHeight(48)
+        tl = hbox(top, (SP["lg"], 0, SP["sm"], 0), SP["xs"])
+        self._eyebrow = label("", "eyebrow")
+        tl.addWidget(self._eyebrow)
+        tl.addStretch()
+        self._refresh_btn = IconButton("refresh", on_click=self._refresh_price)
+        tl.addWidget(self._refresh_btn)
+        self._close_btn = IconButton("close", on_click=self._on_close)
+        tl.addWidget(self._close_btn)
+        root.addWidget(top)
+        root.addWidget(Divider())
 
-        self._title_lbl = _lbl("", 12, bold=True)
-        tb.addWidget(self._title_lbl)
-        tb.addStretch()
-
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(32, 32)
-        close_btn.setStyleSheet(f"""
-            QPushButton {{ background:transparent; color:{COLORS['text_dim']};
-                border:none; border-radius:6px; font-size:13px; }}
-            QPushButton:hover {{ background:{COLORS['card_hover']}; }}
-        """)
-        close_btn.clicked.connect(self.on_close)
-        tb.addWidget(close_btn)
-        root.addWidget(topbar)
-
-        # Scroll area
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet(f"""
-            QScrollArea {{ border:none; background:{COLORS['panel']}; }}
-            QScrollBar:vertical {{
-                background:{COLORS['panel']}; width:4px; border:none;
-            }}
-            QScrollBar::handle:vertical {{
-                background:{COLORS['border']}; border-radius:2px;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
-        """)
-        self._content = QWidget()
-        self._content.setStyleSheet(f"background:{COLORS['panel']};")
-        self._content_lay = QVBoxLayout(self._content)
-        self._content_lay.setContentsMargins(0, 0, 0, 16)
-        self._content_lay.setSpacing(0)
-        self._scroll.setWidget(self._content)
+        content = QWidget()
+        lay = vbox(content, (SP["lg"], SP["lg"], SP["md"], SP["xl"]), SP["lg"])
+        self._scroll = scroll_area(content)
         root.addWidget(self._scroll, 1)
 
-    def load_game(self, game: Game):
-        self._game = game
-        self._title_lbl.setText(game.name)
-        # Clear content synchronously — deleteLater is async and causes overlap
-        while self._content_lay.count():
-            item = self._content_lay.takeAt(0)
-            w = item.widget()
-            if w:
-                w.hide()
-                w.setParent(None)
-        self._render(game)
+        # header: cover + name / meta / pills
+        head = hbox(spacing=SP["md"])
+        self._cover = CoverImage(COVER_W, COVER_H)
+        head.addWidget(self._cover, 0, Qt.AlignmentFlag.AlignTop)
+        col = vbox(spacing=SP["xs"])
+        self._name = label("", "title", wrap=True)
+        self._name.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        col.addWidget(self._name)
+        self._meta = label("", "muted", wrap=True)
+        col.addWidget(self._meta)
+        col.addSpacing(SP["xs"])
+        pills = hbox(spacing=SP["xs"])
+        self._status_pill = Pill("", "neutral", mono=False)
+        self._play_pill = Pill("", "accent", mono=False)
+        self._low_pill = Pill("", "gold")
+        for p in (self._status_pill, self._play_pill, self._low_pill):
+            pills.addWidget(p)
+        pills.addStretch()
+        col.addLayout(pills)
+        col.addStretch()
+        head.addLayout(col, 1)
+        lay.addLayout(head)
+        lay.addWidget(Divider())
 
-    # ── Render ────────────────────────────────────────────────────────────────
+        # price
+        self._price_title = self._section(lay, "detail.price_section")
+        prow = hbox(spacing=SP["sm"])
+        # two labels (normal / on-sale green) so no stylesheet is touched at runtime
+        self._price_value = label("", "value")
+        prow.addWidget(self._price_value, 0, Qt.AlignmentFlag.AlignBottom)
+        self._price_value_sale = label("", "value", color=C["green"])
+        prow.addWidget(self._price_value_sale, 0, Qt.AlignmentFlag.AlignBottom)
+        self._price_base = label("", "muted")
+        self._price_base.setProperty("role", "mono")
+        prow.addWidget(self._price_base, 0, Qt.AlignmentFlag.AlignBottom)
+        self._disc_pill = Pill("", "green")
+        prow.addWidget(self._disc_pill, 0, Qt.AlignmentFlag.AlignBottom)
+        prow.addStretch()
+        lay.addLayout(prow)
 
-    def _render(self, game: Game):
-        lay = self._content_lay
-        P   = 12
+        self._low_row = QWidget()
+        lrow = hbox(self._low_row, spacing=SP["sm"])
+        lrow.addWidget(_icon_label("chart-line", C["accent"]))
+        self._low_label = label("", "dim")
+        lrow.addWidget(self._low_label)
+        lrow.addStretch()
+        self._low_value = label("", "mono", weight=QFont.Weight.Bold)
+        lrow.addWidget(self._low_value)
+        self._low_date = label("", "muted")
+        lrow.addWidget(self._low_date)
+        lay.addWidget(self._low_row)
 
-        def add(w, **pack_kw):
-            lay.addWidget(w)
+        self._hint_row = QWidget()
+        hrow = hbox(self._hint_row, spacing=SP["sm"])
+        hrow.addWidget(_icon_label("key-round", C["text_muted"]), 0, Qt.AlignmentFlag.AlignTop)
+        self._hint = label("", "muted", wrap=True)
+        hrow.addWidget(self._hint, 1)
+        lay.addWidget(self._hint_row)
 
-        # Cover
-        cov_lbl = QLabel()
-        cov_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        cov_lbl.setAutoFillBackground(False)
-        if game.cover_path:
-            px = QPixmap(game.cover_path)
-            if not px.isNull():
-                px = px.scaled(160, 240, Qt.AspectRatioMode.KeepAspectRatio,
-                               Qt.TransformationMode.SmoothTransformation)
-                cov_lbl.setPixmap(px)
-        cov_lbl.setContentsMargins(0, 12, 0, 0)
-        add(cov_lbl)
+        self._rec_card = Card(padding=SP["md"], spacing=SP["sm"])
+        lay.addWidget(self._rec_card)
+        lay.addWidget(Divider())
 
-        # Priority badge
-        badge_row = QWidget()
-        badge_row.setAutoFillBackground(False)
-        br = QHBoxLayout(badge_row)
-        br.setContentsMargins(P, 8, P, 0)
-        br.setSpacing(6)
-        badge = QLabel(game.priority)
-        badge.setFixedSize(24, 24)
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        color = PRIORITY_COLORS.get(game.priority, "#666")
-        badge.setStyleSheet(f"""
-            background:{color}; color:#000; border-radius:4px;
-            font-family:'Space Mono'; font-weight:bold; font-size:10px;
-        """)
-        br.addWidget(badge)
-        br.addWidget(_lbl(i18n.t(f"priority.{game.priority}"), 10,
-                          color=COLORS["text_dim"]))
-        br.addStretch()
-        add(badge_row)
+        # regions
+        self._regions_title = self._section(lay, "detail.price_by_region")
+        self._region_card = Card(padding=SP["md"], spacing=0)
+        lay.addWidget(self._region_card)
+        lay.addWidget(Divider())
 
-        # Game name
-        name_lbl = _lbl(game.name, 13, bold=True)
-        name_lbl.setWordWrap(True)
-        name_lbl.setContentsMargins(P, 4, P, 0)
-        add(name_lbl)
+        # editable fields
+        self._take_title = self._section(lay, "detail.your_take")
+        self._priority_label = label("", "dim")
+        self._priority = Segmented([(p, p) for p in PRIORITY_OPTIONS])
+        self._priority.changed.connect(self._on_priority)
+        lay.addLayout(self._field(self._priority_label, self._priority))
 
-        # Steam button
-        if game.app_id:
-            steam_btn = QPushButton(i18n.t("detail.check_on_steam"))
-            steam_btn.setFixedHeight(32)
-            steam_btn.setStyleSheet(f"""
-                QPushButton {{ background:#1B2838; color:{COLORS['blue']};
-                    border:1px solid {COLORS['blue']}; border-radius:6px;
-                    font-family:'Space Mono'; font-size:12px; font-weight:bold;
-                    margin:8px {P}px 0 {P}px; }}
-                QPushButton:hover {{ background:#2a475e; }}
-            """)
-            steam_btn.clicked.connect(
-                lambda: open_steam_page(game.app_id, game.steam_url))
-            add(steam_btn)
+        self._play_label = label("", "dim")
+        self._play = QComboBox()
+        self._play.setMinimumHeight(34)
+        for key in _PLAY_STATUSES:
+            self._play.addItem("", key)
+        self._play.currentIndexChanged.connect(self._on_play_status)
+        lay.addLayout(self._field(self._play_label, self._play))
 
-        # Purchased / Buy button
-        import data.purchase_repository as purchases
-        bought = purchases.get_by_app_id(game.app_id)
-        if bought:
-            b_frame = QFrame()
-            b_frame.setObjectName("PurchasedBanner")
-            b_frame.setStyleSheet(f"""
-                QFrame#PurchasedBanner {{
-                    background:#0a1f0a; border:1px solid #1a4a1a;
-                    border-radius:8px; margin:{4}px {P}px 0 {P}px;
-                }}
-            """)
-            bf = QVBoxLayout(b_frame)
-            bf.setContentsMargins(12, 8, 12, 8)
-            bf.setSpacing(2)
+        self._rating_label = label("", "dim")
+        stars_box = QWidget()
+        stars = hbox(stars_box, (0, 0, 0, 0), SP["xs"])
+        self._stars: list[IconButton] = []
+        for i in range(1, _MAX_RATING + 1):
+            b = IconButton("star", size=20, color=C["text_muted"],
+                           on_click=lambda _=False, n=i: self._on_rating(n))
+            self._stars.append(b)
+            stars.addWidget(b)
+        stars.addStretch()
+        lay.addLayout(self._field(self._rating_label, stars_box))
 
-            # Top row: checkmark + edition (truncated)
-            top_row = QHBoxLayout()
-            top_row.setSpacing(6)
-            edition_text = bought.edition or i18n.t("detail.standard_edition")
-            if len(edition_text) > 28:
-                edition_text = edition_text[:26] + "…"
-            check_lbl = _lbl(i18n.t("detail.purchased_label").format(edition=edition_text),
-                             11, bold=True, color=COLORS["green"])
-            check_lbl.setAutoFillBackground(False)
-            top_row.addWidget(check_lbl, 1)
+        self._notes_label = label("", "dim")
+        self._notes = QPlainTextEdit()
+        self._notes.setFixedHeight(84)
+        self._notes.installEventFilter(self)
+        lay.addLayout(self._field(self._notes_label, self._notes))
+        srow = hbox()
+        srow.addStretch()
+        self._save_btn = Button("", "link", icon="check", on_click=self._save_notes)
+        srow.addWidget(self._save_btn)
+        lay.addLayout(srow)
+        lay.addWidget(Divider())
 
-            # Price on same line, right-aligned, fixed width
-            price_lbl = _lbl(
-                f"${bought.price_paid:,.2f} {bought.currency}",
-                10, color=COLORS["green"])
-            price_lbl.setAutoFillBackground(False)
-            top_row.addWidget(price_lbl)
-            bf.addLayout(top_row)
+        # actions
+        self._purchased_card = Card(padding=SP["md"], spacing=2)
+        self._purchased_card.setProperty("surface", "inset")
+        pc = hbox(spacing=SP["sm"])
+        pc.addWidget(_icon_label("badge-check", C["green"], 16), 0, Qt.AlignmentFlag.AlignTop)
+        pcol = vbox(spacing=2)
+        self._purchased_title = label("", "body", color=C["green"], wrap=True)
+        pcol.addWidget(self._purchased_title)
+        self._purchased_sub = label("", "muted")
+        self._purchased_sub.setProperty("role", "mono")
+        pcol.addWidget(self._purchased_sub)
+        pc.addLayout(pcol, 1)
+        self._purchased_card.body.addLayout(pc)
+        lay.addWidget(self._purchased_card)
 
-            # Date below, smaller
-            date_lbl = _lbl(bought.purchased_at or "", 9, color=COLORS["text_dim"])
-            date_lbl.setAutoFillBackground(False)
-            bf.addWidget(date_lbl)
-            add(b_frame)
-        else:
-            buy_btn = QPushButton(i18n.t("detail.i_bought_this"))
-            buy_btn.setFixedHeight(34)
-            buy_btn.setStyleSheet(f"""
-                QPushButton {{ background:{COLORS['green']}; color:#000;
-                    border:none; border-radius:6px;
-                    font-family:'Space Mono'; font-size:12px; font-weight:bold;
-                    margin:8px {P}px 0 {P}px; }}
-                QPushButton:hover {{ background:#86efac; }}
-            """)
-            buy_btn.clicked.connect(lambda: self._mark_purchased(game))
-            add(buy_btn)
-
-        add(_divider())
-        self._render_price(lay, game, P)
-        add(_divider())
-        self._render_price_compare(lay, game, P)
-        add(_divider())
-        self._render_recommendation(lay, game, P)
-        add(_divider())
-
-        # Metadata
-        for label, value in [
-            (i18n.t("game.genre"),    game.genre or "—"),
-            (i18n.t("game.year"),     str(game.release_year) if game.release_year else "—"),
-            (i18n.t("game.developer"),game.developer or "—"),
-            (i18n.t("game.publisher"),game.publisher or "—"),
-        ]:
-            row = QWidget()
-            row.setAutoFillBackground(False)
-            rl = QHBoxLayout(row)
-            rl.setContentsMargins(P, 1, P, 1)
-            l1 = _lbl(label + ":", 10, color=COLORS["text_dim"])
-            l1.setFixedWidth(90)
-            l2 = _lbl(value, 10)
-            l2.setWordWrap(True)
-            rl.addWidget(l1)
-            rl.addWidget(l2, 1)
-            add(row)
-
-        add(_divider())
-        self._render_edit(lay, game, P)
-
-        # Action buttons
-        for text, cmd, danger in [
-            (i18n.t("detail.refresh_prices"), lambda: self._refresh_prices(game), False),
-            (i18n.t("detail.retry_cover"),    lambda: self._download_cover(game), False),
-            (i18n.t("detail.delete_game"),    lambda: self._delete(game),         True),
-        ]:
-            btn = _ghost_btn(text, cmd, danger)
-            btn.setContentsMargins(P, 0, P, 0)
-            w = QWidget()
-            w.setAutoFillBackground(False)
-            wl = QVBoxLayout(w)
-            wl.setContentsMargins(P, 2, P, 2)
-            wl.addWidget(btn)
-            add(w)
-
+        self._buy_btn = Button("", "primary", icon="shopping-cart", on_click=self._mark_purchased)
+        self._buy_btn.setMinimumHeight(36)
+        lay.addWidget(self._buy_btn)
+        self._steam_btn = Button("", "default", icon="external", on_click=self._open_steam)
+        lay.addWidget(self._steam_btn)
+        self._cover_btn = Button("", "ghost", icon="image", on_click=self._download_cover)
+        lay.addWidget(self._cover_btn)
+        self._delete_btn = Button("", "danger", icon="trash", on_click=self._delete)
+        lay.addWidget(self._delete_btn)
         lay.addStretch()
 
-    # ── Price section ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _field(title: QLabel, widget: QWidget):
+        """Label + input grouped tightly (xs) so the lg section spacing reads as groups."""
+        col = vbox(spacing=SP["xs"])
+        col.addWidget(title)
+        col.addWidget(widget)
+        return col
 
-    def _render_price(self, lay, game: Game, P: int):
-        frame = QWidget()
-        frame.setAutoFillBackground(False)
-        fl = QVBoxLayout(frame)
-        fl.setContentsMargins(P, 0, P, 0)
-        fl.setSpacing(2)
+    def _section(self, lay, key: str) -> QLabel:
+        """Uppercase eyebrow title for a section; returns the label for retranslate."""
+        lbl = label("", "eyebrow")
+        lbl.setProperty("i18n", key)
+        lay.addWidget(lbl)
+        return lbl
 
-        if game.price:
-            p = game.price
-            pr = QHBoxLayout()
-            price_lbl = _lbl(f"${p.current:,.0f} {p.currency}", 20, bold=True,
-                             color=COLORS["green"] if p.is_on_sale else COLORS["text"])
-            pr.addWidget(price_lbl)
-            if p.discount_pct:
-                disc = QLabel(f"-{p.discount_pct}%")
-                disc.setFixedHeight(22)
-                disc.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                disc.setFont(QFont("Space Mono", 10, QFont.Weight.Bold))
-                disc.setStyleSheet(f"""
-                    background:{COLORS['green']}; color:#fff;
-                    border-radius:4px; padding:0 6px;
-                """)
-                pr.addWidget(disc)
-            pr.addStretch()
-            fl.addLayout(pr)
-            if p.base != p.current:
-                fl.addWidget(_lbl(
-                    f"{i18n.t('detail.base_price')}: ${p.base:,.0f}",
-                    10, color=COLORS["text_dim"]))
+    # ── public API ───────────────────────────────────────────────────────────
 
-        if game.price_history and game.price_history.all_time_low > 0:
-            h = game.price_history
-            fl.addWidget(_lbl(
-                f"{i18n.t('game.price_low')}: ${h.all_time_low:,.0f}",
-                11, bold=True, color=COLORS["blue"]))
-            if h.all_time_low_date:
-                fl.addWidget(_lbl(h.all_time_low_date, 9,
-                                  color=COLORS["text_dim"]))
+    def load_game(self, game: Game) -> None:
+        """Show *game*; region prices are fetched once per app_id."""
+        self._game = game
+        self._apply(game)
+        self._scroll.verticalScrollBar().setValue(0)
+        self._load_regions(game)
+        self._ensure_history(game)
 
-            if game.price_diff_pct is not None:
-                diff = game.price_diff_pct
-                rec  = game.buy_recommendation
-                col  = (COLORS["green"] if diff <= 5 else
-                        COLORS["gold"]  if diff <= 25 else COLORS["red"])
-                fl.addWidget(_lbl(f"→ {rec}", 11, bold=True, color=col))
-
-                prog = QProgressBar()
-                prog.setFixedHeight(6)
-                prog.setRange(0, 100)
-                prog.setValue(max(0, min(100, int((1 - diff/100)*100))))
-                prog.setTextVisible(False)
-                bar_col = COLORS["green"] if diff <= 5 else COLORS["gold"]
-                prog.setStyleSheet(f"""
-                    QProgressBar {{ background:{COLORS['border']}; border-radius:3px; }}
-                    QProgressBar::chunk {{ background:{bar_col}; border-radius:3px; }}
-                """)
-                fl.addWidget(prog)
-
-        lay.addWidget(frame)
-
-    # ── Price comparator ─────────────────────────────────────────────────────
-
-    def _render_price_compare(self, lay, game: Game, P: int):
-        """Show price in configured regions vs user's base currency."""
-        from ui.settings_loader import get_settings
-        settings = get_settings()
-
-        base_cc     = settings.get("country", "mx")
-        compare_ccs = settings.get("compare_regions", ["us", "ar", "br"])
-        all_regions = [base_cc] + [r for r in compare_ccs if r != base_cc]
-
-        def region_name(cc): return i18n.t(f"regions.{cc}")
-
-        frame = QWidget()
-        frame.setAutoFillBackground(False)
-        fl = QVBoxLayout(frame)
-        fl.setContentsMargins(P, 0, P, 0)
-        fl.setSpacing(4)
-        fl.addWidget(_lbl(i18n.t("detail.price_by_region"), 11, bold=True))
-
-        # Build rows — keep refs in a local dict tied to this frame
-        row_labels: dict[str, tuple] = {}
-        for cc in all_regions:
-            row = QWidget(); row.setAutoFillBackground(False)
-            rl  = QHBoxLayout(row)
-            rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(8)
-
-            name_lbl = _lbl(region_name(cc), 10, color=COLORS["text_dim"])
-            name_lbl.setFixedWidth(120)
-            rl.addWidget(name_lbl)
-
-            price_lbl = _lbl("…", 11, bold=True)
-            rl.addWidget(price_lbl)
-
-            diff_lbl = _lbl("", 10)
-            if cc == base_cc:
-                diff_lbl.setText(i18n.t("detail.base_ref"))
-                diff_lbl.setStyleSheet(f"color:{COLORS['blue']};")
-            rl.addWidget(diff_lbl)
-            rl.addStretch()
-
-            row_labels[cc] = (price_lbl, diff_lbl)
-            fl.addWidget(row)
-
-        lay.addWidget(frame)
-
-        if not game.app_id:
-            for cc in all_regions:
-                pl, _ = row_labels.get(cc, (None, None))
-                if pl:
-                    pl.setText(i18n.t("detail.not_available"))
-                    pl.setStyleSheet(f"color:{COLORS['text_dim']};")
+    def _ensure_history(self, g: Game) -> None:
+        """Fetch the all-time low in the background when the game has none yet
+        (ITAD if a key is set, otherwise the locally observed low)."""
+        app_id = str(g.app_id or "")
+        if not app_id or app_id.startswith("unknown") or g.price_history is not None:
             return
+        if app_id in self._hist_pending:
+            return
+        self._hist_pending.add(app_id)
+        country = get_settings().get("country") or "us"
+        currency = g.price.currency if g.price else None
 
-        # Use price_data signal to deliver the full prices dict at once.
-        # Disconnect stale slot from any previous game panel.
-        # PySide6 emits a harmless RuntimeWarning when disconnect() is
-        # called on a signal with nothing connected — suppress just that
-        # warning here rather than globally.
-        import warnings
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", RuntimeWarning)
-                self._sig.price_data.disconnect()
-        except (RuntimeError, TypeError):
-            pass
+        def work():
+            from services import price_history
+            return price_history.get_price_history(app_id, country, currency=currency)
 
-        def _on_prices_ready(cc_unused: str, prices_obj):
-            """Receives the full {cc: PriceInfo|None} dict via the signal."""
-            prices: dict = prices_obj  # we'll abuse the second arg as payload
+        def on_done(result):
+            self._hist_pending.discard(app_id)
+            if isinstance(result, Exception) or result is None:
+                return
+            if self._game is None or str(self._game.app_id) != app_id:
+                target = repo.get_by_app_id(app_id)
+                if target is not None and target.price_history is None:
+                    target.price_history = result
+                    repo.update(target)
+                return
+            self._game.price_history = result
+            repo.update(self._game)
+            self._apply(self._game)
+            self._on_refresh()
 
-            # ── Build a USD equivalent for every region ──────────────────────
-            # Steam's cc=us always returns USD, so use it as the common unit.
-            # For each region we fetch their price in USD using the store's own
-            # regional pricing (cc=us gives the US price; others are Steam's
-            # regional equivalents already expressed in their local currency).
-            # We compare via the ratio: local_usd_equiv / base_usd_equiv.
-            #
-            # To get a USD equivalent without a currency API we ask Steam for
-            # each region's price with cc=us (which is the US price), but
-            # that gives the same number for all — not useful.
-            # Instead we use the ratio of (current / base_price_usd_ref):
-            #   base_usd_ref  = price fetched with cc=us for the same game
-            #   other_usd_ref = price fetched with cc=us for the same game too
-            # That's identical, so we need actual exchange-rate normalization.
-            #
-            # Simplest correct approach: Steam's storefront for Argentina (ar)
-            # returns prices in USD already. For others we use a hardcoded
-            # rough table — good enough for a "cheap vs expensive" signal.
-            USD_RATES = {
-                "USD": 1.0,
-                "MXN": 0.050,   # 1 MXN ≈ 0.050 USD
-                "BRL": 0.18,    # 1 BRL ≈ 0.18 USD
-                "JPY": 0.0065,  # 1 JPY ≈ 0.0065 USD
-                "EUR": 1.08,
-                "GBP": 1.27,
-                "CAD": 0.73,
-                "AUD": 0.64,
-                "RUB": 0.011,
-                "TRY": 0.028,
-                "KRW": 0.00073,
-                "CNY": 0.138,
-                "PLN": 0.25,
-                "CZK": 0.044,
-                "HUF": 0.0027,
-                "NOK": 0.094,
-                "SEK": 0.095,
-                "DKK": 0.145,
-                "CHF": 1.12,
-                "NZD": 0.60,
-                "SGD": 0.74,
-                "HKD": 0.128,
-                "TWD": 0.031,
-                "THB": 0.028,
-                "INR": 0.012,
-                "CLP": 0.00105,
-                "COP": 0.00024,
-                "PEN": 0.27,
-                "ARS": 0.00095,
-                "UAH": 0.024,
-            }
+        run_async(self, work, on_done=on_done)
 
-            def to_usd(p) -> float | None:
-                if not p:
-                    return None
-                rate = USD_RATES.get(p.currency)
-                if rate is None:
-                    return None
-                return p.current * rate
+    def reload(self) -> None:
+        """Re-read the current game from the repository and re-render in place."""
+        if self._game is None:
+            return
+        fresh = repo.get_by_id(self._game.id)
+        if fresh is None:            # deleted elsewhere
+            return
+        self._game = fresh
+        self._apply(fresh)
+        if fresh.app_id in self._region_cache:
+            self._render_regions(self._region_cache[fresh.app_id])
 
-            base_p   = prices.get(base_cc)
-            base_usd = to_usd(base_p)
+    def retranslate(self) -> None:
+        t = i18n.t
+        self._eyebrow.setText(t("detail.eyebrow").upper())
+        self._refresh_btn.setToolTip(t("detail.refresh"))
+        self._close_btn.setToolTip(t("detail.close"))
+        for lbl in (self._price_title, self._regions_title, self._take_title):
+            lbl.setText(t(lbl.property("i18n")).upper())
+        self._low_label.setText(t("game.price_low"))
+        self._priority_label.setText(t("game.priority"))
+        self._play_label.setText(t("detail.play_status"))
+        self._rating_label.setText(t("game.rating"))
+        self._notes_label.setText(t("game.notes"))
+        self._notes.setPlaceholderText(t("detail.notes_placeholder"))
+        self._save_btn.setText(t("actions.save"))
+        self._buy_btn.setText(t("detail.mark_purchased"))
+        self._steam_btn.setText(t("detail.open_steam"))
+        self._cover_btn.setText(t("detail.download_cover"))
+        self._delete_btn.setText(t("detail.delete_game"))
+        self._low_pill.setText(t("game.at_low").upper())
+        for i, key in enumerate(_PLAY_STATUSES):
+            self._play.setItemText(i, t(f"play_status.{key or 'none'}"))
+        for p in PRIORITY_OPTIONS:
+            self._priority.set_label(p, p)
+        if self._game is not None:
+            self._apply(self._game)
+            if self._game.app_id in self._region_cache:
+                self._render_regions(self._region_cache[self._game.app_id])
 
-            for cc in all_regions:
-                p  = prices.get(cc)
-                pl, dl = row_labels.get(cc, (None, None))
-                if not pl:
-                    continue
+    # ── render in place ──────────────────────────────────────────────────────
 
-                # Price label
-                if p:
-                    txt = f"{p.current:,.0f} {p.currency}"
-                    col = COLORS["green"] if p.is_on_sale else COLORS["text"]
-                else:
-                    txt = i18n.t("detail.not_available")
-                    col = COLORS["text_dim"]
-                pl.setText(txt)
-                pl.setStyleSheet(f"color:{col};")
+    def _apply(self, g: Game) -> None:
+        t = i18n.t
+        self._cover.set_pixmap(image_cache.get(g.cover_path, (COVER_W, COVER_H)))
+        self._name.setText(g.name)
+        meta = [g.genre, str(g.release_year) if g.release_year else "", g.developer]
+        self._meta.setText(" · ".join(m for m in meta if m))
+        self._meta.setVisible(bool(self._meta.text()))
 
-                # Diff label
-                if not dl:
-                    continue
-                if cc == base_cc:
-                    diff_txt = i18n.t("detail.base_ref")
-                    diff_col = COLORS["blue"]
-                elif p and base_usd and base_usd > 0:
-                    other_usd = to_usd(p)
-                    if other_usd is not None:
-                        pct = ((other_usd - base_usd) / base_usd) * 100
-                        if pct < -1:
-                            diff_txt = f"{pct:+.0f}%"
-                            diff_col = COLORS["green"]   # cheaper → green
-                        elif pct > 1:
-                            diff_txt = f"{pct:+.0f}%"
-                            diff_col = COLORS["red"]     # pricier → red
-                        else:
-                            diff_txt = i18n.t("detail.approx_equal")
-                            diff_col = COLORS["text_dim"]
-                    else:
-                        diff_txt = ""
-                        diff_col = COLORS["text_dim"]
-                elif p:
-                    diff_txt = ""
-                    diff_col = COLORS["text_dim"]
-                else:
-                    diff_txt = ""
-                    diff_col = COLORS["text_dim"]
+        # pills
+        if g.status == STATUS_PURCHASED:
+            self._status_pill.setText(t("mark_purchased.purchased_badge")); self._status_pill.set_tone("green")
+        elif g.status == STATUS_ARCHIVED:
+            self._status_pill.setText(t("status.Archivado")); self._status_pill.set_tone("neutral")
+        else:
+            self._status_pill.setText(t("status.Wishlist")); self._status_pill.set_tone("neutral")
+        self._play_pill.setText(t(f"play_status.{g.play_status}") if g.play_status else "")
+        self._play_pill.setVisible(bool(g.play_status))
+        diff = g.price_diff_pct
+        self._low_pill.setVisible(diff is not None and diff <= 5)
 
-                dl.setText(diff_txt)
-                dl.setStyleSheet(f"color:{diff_col};")
+        # price
+        p = g.price
+        sale = bool(p and p.is_on_sale)
+        self._price_value.setVisible(not sale)
+        self._price_value_sale.setVisible(sale)
+        if p:
+            (self._price_value_sale if sale else self._price_value).setText(money(p.current, p.currency))
+            struck = bool(sale and p.base and p.base > p.current)
+            self._price_base.setText(f"<s>{money(p.base, p.currency)}</s>" if struck else "")
+            self._price_base.setVisible(struck)
+            self._disc_pill.setText(discount(p.discount_pct))
+            self._disc_pill.setVisible(bool(p.discount_pct))
+        else:
+            self._price_value.setText(money(None))
+            self._price_base.setVisible(False)
+            self._disc_pill.setVisible(False)
 
-        self._sig.price_data.connect(_on_prices_ready)
+        from services import price_history
+        h = g.price_history
+        has_low = bool(h and h.all_time_low and h.all_time_low > 0)
+        self._low_row.setVisible(has_low)
+        if has_low:
+            cur = p.currency if p else "USD"
+            self._low_value.setText(money(h.all_time_low, cur))
+            src = getattr(h, "source", "") or ""
+            date_txt = day(h.all_time_low_date) if h.all_time_low_date else ""
+            if src == price_history.SOURCE_OBSERVED:
+                date_txt = t("detail.low_observed", date=date_txt) if date_txt else t("detail.low_observed_nodate")
+            elif src == price_history.SOURCE_ITAD:
+                date_txt = f"{date_txt} · ITAD" if date_txt else "ITAD"
+            self._low_date.setText(date_txt)
+            self._low_date.setVisible(bool(date_txt))
+        configured = price_history.is_configured()
+        self._hint_row.setVisible(not has_low or (not configured and getattr(h, "source", "") == price_history.SOURCE_OBSERVED))
+        self._hint.setText(t("detail.no_history_refresh") if configured else t("detail.itad_hint"))
 
-        import threading as _t
-        import services.steam_api as _steam
+        self._render_recommendation(g)
 
-        def _fetch():
-            prices: dict = {}
-            for cc in all_regions:
-                try:
-                    prices[cc] = _steam.refresh_price(str(game.app_id), country=cc)
-                except Exception as e:
-                    print(f"[PriceCompare] {cc} exception: {e}")
-                    prices[cc] = None
-            # Emit once with all data; reuse signal with prices dict as payload
-            self._sig.price_data.emit("__done__", prices)
+        # editable fields (no signals while syncing)
+        self._priority.set_current(g.priority if g.priority in PRIORITY_OPTIONS else None, emit=False)
+        self._play.blockSignals(True)
+        idx = _PLAY_STATUSES.index(g.play_status) if g.play_status in _PLAY_STATUSES else 0
+        self._play.setCurrentIndex(idx)
+        self._play.blockSignals(False)
+        self._paint_stars(g.personal_rating or 0)
+        if not self._notes.hasFocus() and self._notes.toPlainText() != (g.notes or ""):
+            self._notes.setPlainText(g.notes or "")
 
-        _t.Thread(target=_fetch, daemon=True).start()
+        # actions
+        bought = purchases.get_by_app_id(g.app_id) if g.app_id else None
+        self._purchased_card.setVisible(bought is not None)
+        self._buy_btn.setVisible(bought is None)
+        if bought is not None:
+            self._purchased_title.setText(
+                t("detail.purchased_label", edition=bought.edition or t("detail.standard_edition")))
+            self._purchased_sub.setText(t("detail.purchased_on",
+                                          price=money(bought.price_paid, bought.currency),
+                                          date=day(bought.purchased_at)))
+        self._steam_btn.setVisible(bool(g.app_id or g.steam_url))
+        self._cover_btn.setVisible(not g.cover_path and bool(g.app_id))
 
-    # ── Recommendation ────────────────────────────────────────────────────────
-
-    def _render_recommendation(self, lay, game: Game, P: int):
+    def _render_recommendation(self, g: Game) -> None:
+        clear_layout(self._rec_card.body)
         try:
             from services.recommendation import get_recommendation
-            rec = get_recommendation(game)
-        except Exception:
+            rec = get_recommendation(g)
+        except Exception:  # noqa: BLE001
+            log.exception("recommendation failed")
+            self._rec_card.hide()
+            return
+        self._rec_card.show()
+        verdict = rec.get("verdict", "no_data")
+        color, icon, key = _VERDICT.get(verdict, _VERDICT["no_data"])
+        body = self._rec_card.body
+        head = hbox(spacing=SP["sm"])
+        head.addWidget(_icon_label(icon, color, 16))
+        head.addWidget(Pill(i18n.t(key).upper(), _VERDICT_TONE.get(verdict, "neutral")))
+        head.addStretch()
+        conf = rec.get("confidence")
+        if conf and verdict != "no_data":
+            head.addWidget(label(i18n.t(f"detail.confidence_{conf}").upper(), "eyebrow"))
+        body.addLayout(head)
+        body.addWidget(label(rec.get("headline", ""), "body", weight=QFont.Weight.Medium, wrap=True))
+        if rec.get("reason"):
+            body.addWidget(label(rec["reason"], "muted", wrap=True))
+        if rec.get("next_sale"):
+            inset = Card(padding=SP["sm"], spacing=2)
+            inset.setProperty("surface", "inset")
+            inset.body.addWidget(label(i18n.t("detail.next_sale").upper(), "eyebrow"))
+            row = hbox(spacing=SP["sm"])
+            row.addWidget(label(rec["next_sale"], "body", weight=QFont.Weight.Medium, wrap=True), 1)
+            est = rec.get("est_price")
+            if est is not None and g.price:
+                row.addWidget(label(i18n.t("detail.est_price", price=money(est, g.price.currency)),
+                                    "muted"), 0, Qt.AlignmentFlag.AlignTop)
+            inset.body.addLayout(row)
+            body.addWidget(inset)
+
+    def _paint_stars(self, n: int) -> None:
+        for i, b in enumerate(self._stars, start=1):
+            b.set_icon("star", C["gold"] if i <= n else C["text_muted"])
+
+    # ── regions ──────────────────────────────────────────────────────────────
+
+    def _regions_for(self) -> list[str]:
+        s = get_settings()
+        base = (s.get("country") or "us").lower()
+        extra = [str(c).lower() for c in (s.get("compare_regions") or [])]
+        out = [base]
+        for c in extra:
+            if c and c not in out:
+                out.append(c)
+        return out
+
+    def _load_regions(self, game: Game, force: bool = False) -> None:
+        self._region_order = self._regions_for()
+        app_id = str(game.app_id or "")
+        if not app_id:
+            self._render_regions({})
+            return
+        if not force and app_id in self._region_cache:
+            self._render_regions(self._region_cache[app_id])
+            return
+        self._render_region_skeleton()
+        regions = list(self._region_order)
+
+        def work():
+            from services import steam_api
+            out: dict[str, Optional[PriceInfo]] = {}
+            for cc in regions:
+                try:
+                    data = steam_api.get_app_details(app_id, cc, force=force)
+                    out[cc] = steam_api.parse_price(data) if data else None
+                except Exception as e:  # noqa: BLE001
+                    log.warning("region %s: %s", cc, e)
+                    out[cc] = None
+            return out
+
+        def on_done(result):
+            if isinstance(result, Exception):
+                result = {}
+            self._region_cache[app_id] = result
+            if self._game is not None and str(self._game.app_id) == app_id:
+                self._render_regions(result)
+
+        run_async(self, work, on_done=on_done)
+
+    def _render_region_skeleton(self) -> None:
+        body = self._region_card.body
+        clear_layout(body)
+        for i, cc in enumerate(self._region_order):
+            if i:
+                body.addWidget(Divider())
+            row = hbox(margins=(0, SP["sm"], 0, SP["sm"]), spacing=SP["sm"])
+            row.addWidget(Skeleton(96, 12))
+            row.addStretch()
+            row.addWidget(Skeleton(64, 12))
+            body.addLayout(row)
+        self._region_card.setVisible(bool(self._region_order))
+
+    def _render_regions(self, prices: dict[str, Optional[PriceInfo]]) -> None:
+        body = self._region_card.body
+        clear_layout(body)
+        self._region_card.show()
+        t = i18n.t
+        regions = self._region_order
+        if not regions:
+            body.addWidget(label(t("detail.regions_none"), "muted", wrap=True))
+            return
+        if not self._game or not self._game.app_id:
+            body.addWidget(label(t("detail.no_app_id"), "muted", wrap=True))
+            return
+        if not any(prices.get(cc) for cc in regions):
+            row = hbox(spacing=SP["sm"])
+            row.addWidget(_icon_label("cloud-off", C["text_muted"]))
+            row.addWidget(label(t("detail.regions_error"), "muted", wrap=True), 1)
+            row.addWidget(Button(t("detail.retry"), "link", icon="refresh",
+                                 on_click=lambda: self._load_regions(self._game, force=True)))
+            body.addLayout(row)
             return
 
-        colors   = {"buy_now": COLORS["green"], "good_deal": COLORS["blue"],
-                    "wait": COLORS["gold"], "no_data": COLORS["text_dim"]}
-        icons    = {"buy_now": "✓", "good_deal": "◎", "wait": "⏳", "no_data": "—"}
-        accent   = colors.get(rec["verdict"], COLORS["text_dim"])
-        icon     = icons.get(rec["verdict"], "—")
+        usd = {cc: _to_usd(prices.get(cc)) for cc in regions}
+        ranked = [cc for cc in regions if usd[cc] is not None]
+        cheapest = min(ranked, key=lambda cc: usd[cc]) if len(ranked) > 1 else None
+        base_cc = regions[0]
+        for i, cc in enumerate(regions):
+            if i:
+                body.addWidget(Divider())
+            p = prices.get(cc)
+            row = hbox(margins=(0, SP["sm"], 0, SP["sm"]), spacing=SP["sm"])
+            rn = t(f"regions.{cc}")
+            row.addWidget(label(rn if rn != f"regions.{cc}" else cc.upper(), "body"))
+            if cc == base_cc:
+                row.addWidget(Pill(t("detail.base_ref").upper(), "neutral"))
+            if cc == cheapest:
+                row.addWidget(Pill(t("detail.cheapest").upper(), "green"))
+            row.addStretch()
+            if p:
+                if p.discount_pct:
+                    row.addWidget(Pill(discount(p.discount_pct), "green"))
+                price = label(money(p.current, p.currency), "mono", weight=QFont.Weight.Bold,
+                              color=C["green"] if p.is_on_sale else C["text"])
+            else:
+                price = label(t("detail.not_available"), "muted")
+            row.addWidget(price)
+            body.addLayout(row)
 
-        card = QFrame()
-        card.setObjectName("F1gamedeta")
-        card.setStyleSheet(f"""
-            QFrame#F1gamedeta {{
-                background:{COLORS['card']};
-                border:1px solid {COLORS['border']};
-                border-left:3px solid {accent};
-                border-radius:8px;
-                margin:0 {P}px;
-            }}
-        """)
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(14, 10, 10, 10)
-        cl.setSpacing(4)
+    # ── edits ────────────────────────────────────────────────────────────────
 
-        header = QHBoxLayout()
-        header.addWidget(_lbl(icon, 15, bold=True, color=accent))
-        header.addWidget(_lbl(rec["headline"], 11, bold=True, color=accent))
-        header.addStretch()
-        cl.addLayout(header)
+    def _save(self, ok_msg: Optional[str] = None) -> None:
+        if self._game is None:
+            return
+        repo.update(self._game)
+        if ok_msg:
+            self._notify(ok_msg, "success")
+        self._on_refresh()
 
-        if rec.get("reason"):
-            rl = _lbl(rec["reason"], 10, color=COLORS["text_dim"], wrap=1)
-            cl.addWidget(rl)
+    def _on_priority(self, p: str) -> None:
+        if self._game and p != self._game.priority:
+            self._game.priority = p
+            self._save()
 
-        if rec.get("next_sale"):
-            sale_box = QFrame()
-            sale_box.setObjectName("F2gamedeta")
-            sale_box.setStyleSheet(f"""
-                QFrame#F2gamedeta {{ background:{COLORS['bg']};
-                    border:1px solid {COLORS['border']}; border-radius:6px; }}
-            """)
-            sb = QVBoxLayout(sale_box)
-            sb.setContentsMargins(10, 6, 10, 8)
-            sb.addWidget(_lbl("NEXT LIKELY SALE", 9, color=COLORS["text_dim"]))
-            sb.addWidget(_lbl(rec["next_sale"], 11, bold=True))
-            cl.addWidget(sale_box)
+    def _on_play_status(self, idx: int) -> None:
+        if self._game is None:
+            return
+        key = _PLAY_STATUSES[idx] if 0 <= idx < len(_PLAY_STATUSES) else ""
+        if key != (self._game.play_status or ""):
+            self._game.play_status = key
+            self._save()
 
-        lay.addWidget(card)
+    def _on_rating(self, n: int) -> None:
+        if self._game is None:
+            return
+        new = None if self._game.personal_rating == n else n     # click again to clear
+        self._game.personal_rating = new
+        self._paint_stars(new or 0)
+        self._save()
 
-    # ── Edit section ──────────────────────────────────────────────────────────
+    def _save_notes(self) -> None:
+        if self._game is None:
+            return
+        text = self._notes.toPlainText().strip()
+        if text != (self._game.notes or ""):
+            self._game.notes = text
+            self._save(i18n.t("detail.saved"))
 
-    def _render_edit(self, lay, game: Game, P: int):
-        w = QWidget()
-        w.setAutoFillBackground(False)
-        wl = QVBoxLayout(w)
-        wl.setContentsMargins(P, 0, P, 0)
-        wl.setSpacing(4)
+    def eventFilter(self, obj, ev):
+        if obj is self._notes and ev.type() == QEvent.Type.FocusOut:
+            self._save_notes()
+        return super().eventFilter(obj, ev)
 
-        wl.addWidget(_lbl(i18n.t("detail.edit_section"), 11, bold=True))
-        wl.addWidget(_lbl(i18n.t("game.priority"), 10, color=COLORS["text_dim"]))
+    # ── actions ──────────────────────────────────────────────────────────────
 
-        p_row = QHBoxLayout()
-        p_row.setSpacing(4)
-        for p in PRIORITY_OPTIONS:
-            color = PRIORITY_COLORS.get(p, "#666")
-            btn = QPushButton(p)
-            btn.setFixedSize(36, 28)
-            active = game.priority == p
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background:{"transparent" if not active else color};
-                    color:#fff; border:1px solid {color};
-                    border-radius:5px;
-                    font-family:'Space Mono'; font-size:10px; font-weight:bold;
-                }}
-                QPushButton:hover {{ background:{color}; }}
-            """)
-            btn.clicked.connect(lambda _, pv=p: self._update_priority(game, pv))
-            p_row.addWidget(btn)
-            self.__dict__[f"_det_pb_{p}"] = btn
-        p_row.addStretch()
-        wl.addLayout(p_row)
+    def _refresh_price(self) -> None:
+        g = self._game
+        if g is None or self._refreshing:
+            return
+        if not g.app_id:
+            self._notify(i18n.t("detail.no_app_id"), "warning")
+            return
+        self._refreshing = True
+        self._refresh_btn.setEnabled(False)
+        self._refresh_btn.set_icon("loader-circle", C["accent"])
+        app_id, country = str(g.app_id), (get_settings().get("country") or "us")
 
-        wl.addWidget(_lbl(i18n.t("game.notes"), 10, color=COLORS["text_dim"]))
-        self._notes_box = QTextEdit()
-        self._notes_box.setFixedHeight(60)
-        self._notes_box.setStyleSheet(f"""
-            QTextEdit {{
-                background:{COLORS['card']}; color:{COLORS['text']};
-                border:1px solid {COLORS['border']}; border-radius:4px;
-                font-family:'Space Mono'; font-size:10px; padding:4px;
-            }}
-        """)
-        if game.notes:
-            self._notes_box.setPlainText(game.notes)
-        wl.addWidget(self._notes_box)
+        def work():
+            from services import price_history, steam_api
+            price = steam_api.refresh_price(app_id, country, force=True)
+            hist = price_history.get_price_history(app_id, country, force=True,
+                                                   currency=price.currency if price else None)
+            return price, hist
 
-        save_btn = QPushButton(i18n.t("actions.save"))
-        save_btn.setFixedHeight(30)
-        save_btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{COLORS['blue']}; color:#0a1929;
-                border:none; border-radius:6px;
-                font-family:'Space Mono'; font-size:11px; font-weight:bold;
-            }}
-            QPushButton:hover {{ background:#4fa8d8; }}
-        """)
-        save_btn.clicked.connect(lambda: self._save_edits(game))
-        wl.addWidget(save_btn)
-        lay.addWidget(w)
+        def on_done(result):
+            self._refreshing = False
+            self._refresh_btn.setEnabled(True)
+            self._refresh_btn.set_icon("refresh")
+            if isinstance(result, Exception):
+                self._notify(i18n.t("detail.refresh_failed", msg=str(result)), "error")
+                return
+            price, hist = result
+            if self._game is None or str(self._game.app_id) != app_id:
+                return
+            if price:
+                self._game.price = price
+            if hist:
+                self._game.price_history = price_history_merge(self._game.price_history, hist)
+            if not price and not hist:
+                self._notify(i18n.t("detail.refresh_failed", msg=i18n.t("detail.not_available")), "error")
+                return
+            repo.update(self._game)
+            self._region_cache.pop(app_id, None)
+            self._apply(self._game)
+            self._load_regions(self._game, force=True)
+            self._notify(i18n.t("detail.refreshed"), "success")
+            self._on_refresh()
 
-    # ── Actions ───────────────────────────────────────────────────────────────
+        run_async(self, work, on_done=on_done)
 
-    def _update_priority(self, game: Game, p: str):
-        game.priority = p
-        repo.update(game)
-        for pr in PRIORITY_OPTIONS:
-            color = PRIORITY_COLORS.get(pr, "#666")
-            btn   = self.__dict__.get(f"_det_pb_{pr}")
-            if btn:
-                active = pr == p
-                btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background:{"transparent" if not active else color};
-                        color:#fff; border:1px solid {color};
-                        border-radius:5px;
-                        font-family:'Space Mono'; font-size:10px; font-weight:bold;
-                    }}
-                    QPushButton:hover {{ background:{color}; }}
-                """)
-        self.on_refresh()
+    def _download_cover(self) -> None:
+        g = self._game
+        if g is None or not g.app_id:
+            return
+        self._cover_btn.set_loading(True)
+        app_id, name = str(g.app_id), g.name
+        key = get_settings().get("steamgriddb_key", "") or ""
 
-    def _save_edits(self, game: Game):
-        game.notes = self._notes_box.toPlainText().strip()
-        repo.update(game)
-        self.on_refresh()
+        def work():
+            from services import steamgriddb
+            return steamgriddb.download_cover(app_id, key, name)
 
-    def _refresh_prices(self, game: Game):
-        def _work():
-            settings = get_settings()
-            country  = settings.get("country", "mx")
-            # Bust the cache so we get fresh data
-            steam._app_details_cache.pop(f"{game.app_id}:{country}", None)
-            data = steam.get_app_details(game.app_id, country=country)
-            if data:
-                game.price = steam.parse_price(data)
-            repo.update(game)
-            self._sig.reload.emit(game)
-            QTimer.singleShot(0, self.on_refresh)
-        threading.Thread(target=_work, daemon=True).start()
+        def on_done(result):
+            self._cover_btn.set_loading(False)
+            if isinstance(result, Exception) or not result:
+                self._notify(i18n.t("detail.cover_failed"), "warning")
+                return
+            if self._game is None or str(self._game.app_id) != app_id:
+                return
+            image_cache.invalidate(app_id)
+            self._game.cover_path = result
+            repo.update(self._game)
+            self._apply(self._game)
+            self._notify(i18n.t("detail.cover_done"), "success")
+            self._on_refresh()
 
-    def _download_cover(self, game: Game):
-        def _work():
-            settings = get_settings()
-            api_key  = settings.get("steamgriddb_key", "")
-            cover = sgdb.download_cover(game.app_id, api_key, game.name)
-            if cover:
-                game.cover_path = cover
-                repo.update(game)
-                self._sig.reload.emit(game)
-                QTimer.singleShot(0, self.on_refresh)
-        threading.Thread(target=_work, daemon=True).start()
+        run_async(self, work, on_done=on_done)
 
-    def _mark_purchased(self, game: Game):
+    def _open_steam(self) -> None:
+        g = self._game
+        if g is None:
+            return
+        opened = bool(g.app_id) and QDesktopServices.openUrl(QUrl(f"steam://store/{g.app_id}"))
+        if not opened:
+            url = g.steam_url or (f"https://store.steampowered.com/app/{g.app_id}" if g.app_id else "")
+            if url:
+                QDesktopServices.openUrl(QUrl(url))
+
+    def _mark_purchased(self) -> None:
+        g = self._game
+        if g is None:
+            return
         from ui.mark_purchased_dialog import MarkPurchasedDialog
-        def _on_success(purchase):
-            self.on_refresh()
-            self._sig.reload.emit(game)
-        dlg = MarkPurchasedDialog(self, game=game, on_success=_on_success)
-        dlg.exec()
 
-    def _delete(self, game: Game):
-        repo.delete(game.id)
-        self.on_close()
+        def done(*_):
+            self._on_refresh()
+            self.reload()
+
+        MarkPurchasedDialog(self.window(), g, on_success=done).exec()
+
+    def _delete(self) -> None:
+        g = self._game
+        if g is None:
+            return
+        ans = QMessageBox.question(self, i18n.t("detail.delete_title"),
+                                   i18n.t("detail.delete_body", name=g.name))
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        repo.delete(g.id)
+        self._game = None
+        self._on_refresh()
+        self._on_close()
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _notify(self, message: str, tone: str = "info") -> None:
+        fn = self._notify_dep or getattr(self.window(), "notify", None)
+        if fn:
+            try:
+                fn(message, tone)
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        log.info("%s: %s", tone, message)

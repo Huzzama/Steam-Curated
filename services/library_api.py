@@ -1,15 +1,23 @@
+"""
+Steam library stats (owned games, playtime) from the public community
+profile XML — no Web API key involved. The SteamID64 comes from the linked
+PimpMySteam account (creds.json). Errors are raised as LibraryError with
+a user-readable message — the view shows it instead of an empty tab.
+"""
+import logging
 import time
 from typing import Optional
 
-import requests
-import certifi
+from services._http import SESSION as _SESSION
 
-_SESSION = requests.Session()
-_SESSION.headers.update({"Accept-Language": "en-US,en;q=0.9"})
-_SESSION.verify = certifi.where()
+log = logging.getLogger("curator.library")
 
 _cache: dict   = {}
 _CACHE_TTL     = 1800   # 30 min
+
+
+class LibraryError(Exception):
+    """User-facing reason why library stats are unavailable."""
 
 
 def _cached(key: str, fn):
@@ -22,100 +30,81 @@ def _cached(key: str, fn):
     return result
 
 
-def _get_credentials() -> tuple[Optional[str], Optional[str]]:
-    """
-    Return (steam_id64, api_key).
-    steam_id64  → settings.json["steam_id64"]
-    api_key     → PimpMySteam backend /auth/steam-api-key via JWT
-    """
+def _get_steam_id() -> str:
+    """SteamID64 of the linked account, or raise LibraryError explaining what is missing."""
+    from services.steamkustom_auth import get_token, get_steam_id
+    if not get_token():
+        raise LibraryError("Connect your PimpMySteam account in Settings.")
+    steam_id = get_steam_id()
+    if not steam_id:
+        raise LibraryError("No Steam account linked — link Steam on pimpmysteam.com › Settings, "
+                           "then reconnect the app.")
+    return steam_id
+
+
+def _hours(text: Optional[str]) -> int:
+    """'1,234.5' (hours, community XML) → minutes."""
+    if not text:
+        return 0
     try:
-        from ui.settings_loader import get_settings
-        s        = get_settings()
-        steam_id = s.get("steam_id64", "").strip() or None
-        if not steam_id:
-            print("[LibraryAPI] No steam_id64 in settings.json — "
-                  "verify your token in Settings at least once to populate it")
-            return None, None
-
-        from services.steamkustom_auth import get_token, get_steam_api_key
-        token = get_token()
-        if not token:
-            print("[LibraryAPI] No PimpMySteam app token saved locally — "
-                  "paste/verify a token in Settings first")
-            return steam_id, None
-
-        api_key = get_steam_api_key(token)
-        if not api_key:
-            print("[LibraryAPI] get_steam_api_key(token) returned None — "
-                  "token may be invalid/expired or the backend call failed")
-        return steam_id, api_key
-    except Exception as e:
-        print(f"[LibraryAPI] credentials error: {e}")
-        return None, None
+        return int(round(float(text.replace(",", "")) * 60))
+    except ValueError:
+        return 0
 
 
-def get_owned_games(steam_id: str, api_key: str) -> list[dict]:
+def get_owned_games(steam_id: str, api_key: str = None) -> list[dict]:
     """
-    Fetch all owned games with playtime.
-    Each item: {appid, name, playtime_forever (minutes), playtime_2weeks?}
+    Owned games with playtime from the public community profile
+    (steamcommunity.com/profiles/<id>/games?xml=1 — no API key needed, but the
+    profile's "Game details" must be public).
+    Each item: {appid, name, playtime_forever (min), playtime_2weeks (min)}
     """
     def _fetch():
+        import xml.etree.ElementTree as ET
         try:
-            r = _SESSION.get(
-                "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/",
-                params={
-                    "key":                       api_key,
-                    "steamid":                   steam_id,
-                    "include_appinfo":           1,
-                    "include_played_free_games": 1,
-                    "skip_unvetted_apps":        0,
-                },
-                timeout=15,
-            )
+            r = _SESSION.get(f"https://steamcommunity.com/profiles/{steam_id}/games",
+                             params={"tab": "all", "xml": "1"}, timeout=20)
             r.raise_for_status()
-            return r.json().get("response", {}).get("games", [])
-        except Exception as e:
-            print(f"[LibraryAPI] GetOwnedGames error: {e}")
-            return None
+            root = ET.fromstring(r.content)
+        except Exception as e:  # noqa: BLE001
+            raise LibraryError(f"Steam community did not answer: {e}") from e
+        err = root.findtext("error")
+        if err:
+            raise LibraryError(err.strip())
+        games = []
+        for g in root.iter("game"):
+            games.append({
+                "appid":            g.findtext("appID", ""),
+                "name":             g.findtext("name", "") or "?",
+                "playtime_forever": _hours(g.findtext("hoursOnRecord")),
+                "playtime_2weeks":  _hours(g.findtext("hoursLast2Weeks")),
+            })
+        return games
+    return _cached(f"owned:{steam_id}", _fetch)
 
-    return _cached(f"owned:{steam_id}", _fetch) or []
 
-
-def get_recently_played(steam_id: str, api_key: str, count: int = 10) -> list[dict]:
-    """Fetch recently played games (last 2 weeks)."""
-    def _fetch():
-        try:
-            r = _SESSION.get(
-                "https://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v1/",
-                params={"key": api_key, "steamid": steam_id, "count": count},
-                timeout=10,
-            )
-            r.raise_for_status()
-            return r.json().get("response", {}).get("games", [])
-        except Exception as e:
-            print(f"[LibraryAPI] GetRecentlyPlayed error: {e}")
-            return None
-
-    return _cached(f"recent:{steam_id}", _fetch) or []
+def get_recently_played(steam_id: str, api_key: str = None, count: int = 10) -> list[dict]:
+    """Games with playtime in the last two weeks, most played first."""
+    games = [g for g in get_owned_games(steam_id) if g.get("playtime_2weeks", 0) > 0]
+    games.sort(key=lambda g: g["playtime_2weeks"], reverse=True)
+    return games[:count]
 
 
 def get_library_stats(steam_id: str = None, api_key: str = None) -> Optional[dict]:
     """
-    Compute all library stats. Returns None if credentials missing or API fails.
+    Compute all library stats. Raises LibraryError with a user-facing reason.
 
     Keys: total_games, total_playtime_hours, avg_playtime_hours,
           most_played, least_played, never_played_count, played_count,
           recently_played, top_played
     """
-    if not steam_id or not api_key:
-        steam_id, api_key = _get_credentials()
-    if not steam_id or not api_key:
-        print("[LibraryAPI] No credentials available")
-        return None
+    if not steam_id:
+        steam_id = _get_steam_id()
 
-    games = get_owned_games(steam_id, api_key)
+    games = get_owned_games(steam_id)
     if not games:
-        return None
+        raise LibraryError("Steam returned no games — set “Game details” to Public in your "
+                           "Steam privacy settings.")
 
     def mins_to_h(m: int) -> float:
         return round(m / 60, 1)
@@ -127,7 +116,7 @@ def get_library_stats(steam_id: str = None, api_key: str = None) -> Optional[dic
     most_played  = max(played, key=lambda g: g.get("playtime_forever", 0)) if played else None
     least_played = min(played, key=lambda g: g.get("playtime_forever", 0)) if played else None
 
-    recently = get_recently_played(steam_id, api_key)
+    recently = get_recently_played(steam_id)
 
     return {
         "total_games":          len(games),
@@ -168,4 +157,4 @@ def get_library_stats(steam_id: str = None, api_key: str = None) -> Optional[dic
 
 
 def invalidate_cache():
-    _cache.clear()
+    _cache.clear()

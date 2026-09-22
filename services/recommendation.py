@@ -41,40 +41,71 @@ SALE_FRIENDLY: dict[str, str] = {
 }
 
 
+def _t(key: str, **kw) -> str:
+    import i18n
+    return i18n.t(f"recommendation.{key}", **kw)
+
+
+def _m(amount: float, currency: str) -> str:
+    from ui.format import money
+    return money(amount, currency)
+
+
 def get_recommendation(game: Game) -> dict:
     """
-    Returns a structured recommendation dict:
+    Returns a structured, already-localised recommendation:
     {
         "verdict":       "wait" | "buy_now" | "good_deal" | "no_data",
-        "headline":      str,   # short one-liner
-        "reason":        str,   # explanation
-        "next_sale":     str | None,   # "Summer Sale 2026 (Jun 25)"
+        "headline":      str,          # short one-liner (localised)
+        "reason":        str,          # explanation (localised)
+        "next_sale":     str | None,   # "Summer Sale 2026 · 25 Jun"
         "next_sale_date":str | None,   # ISO date
         "est_discount":  int | None,   # estimated % during that sale
         "est_price":     float | None, # estimated sale price
-        "confidence":    str,   # "high" | "medium" | "low"
+        "confidence":    "high" | "medium" | "low",
     }
     """
     price   = game.price
     history = game.price_history
 
-    # No data at all
     if not price:
         return _no_data()
 
     today       = date.today()
     diff_pct    = game.price_diff_pct    # % above historical low (None if no history)
-    publisher   = (game.publisher or "").lower()
-    pub_pattern = _match_publisher(publisher)
+    pub_pattern = _match_publisher((game.publisher or "").lower())
+    cur         = price.currency
+    now_str     = _m(price.current, cur)
+    low_str     = _m(history.all_time_low, cur) if history else ""
+
+    observed_note = ""
+    if history is not None and getattr(history, "source", "") == "observed":
+        observed_note = " " + _t("why_observed", date=history.all_time_low_date or "")
+
+    # ── No history at all: judge the current discount against what this
+    #    publisher (or Steam in general) typically bottoms out at ─────────────
+    if history is None and price.is_on_sale and price.discount_pct:
+        typical = pub_pattern["max_discount"] if pub_pattern else 50
+        if price.discount_pct >= typical - 10:
+            return {
+                "verdict":        "good_deal",
+                "headline":       _t("hl_good_deal", pct=price.discount_pct),
+                "reason":         _t("why_estimate_sale", now=now_str, pct=price.discount_pct,
+                                     typical=typical,
+                                     est=_m(round(price.base * (1 - typical / 100), 2), cur)),
+                "next_sale":      None,
+                "next_sale_date": None,
+                "est_discount":   price.discount_pct,
+                "est_price":      price.current,
+                "confidence":     "medium" if pub_pattern else "low",
+            }
 
     # ── Already at or near historical low ────────────────────────────────────
     if diff_pct is not None and diff_pct <= 5:
         return {
             "verdict":        "buy_now",
-            "headline":       "Buy now — at historical low",
-            "reason":         (f"Current price ${price.current:,.0f} {price.currency} "
-                               f"is at or within 5% of the all-time low "
-                               f"(${history.all_time_low:,.0f})."),
+            "headline":       _t("hl_buy_now"),
+            "reason":         _t("why_buy_now", now=now_str, low=low_str) + observed_note,
             "next_sale":      None,
             "next_sale_date": None,
             "est_discount":   price.discount_pct or 0,
@@ -86,11 +117,9 @@ def get_recommendation(game: Game) -> dict:
     if price.is_on_sale and diff_pct is not None and diff_pct <= 25:
         return {
             "verdict":        "good_deal",
-            "headline":       f"Good deal — {price.discount_pct}% off",
-            "reason":         (f"It's on sale now at ${price.current:,.0f} {price.currency}. "
-                               f"Historical low is ${history.all_time_low:,.0f} "
-                               f"— you'd save ${history.all_time_low - price.current + abs(history.all_time_low - price.current):,.0f} "
-                               f"more waiting, but this is already a solid discount."),
+            "headline":       _t("hl_good_deal", pct=price.discount_pct),
+            "reason":         _t("why_good_deal", now=now_str, low=low_str,
+                                 more=_m(max(0.0, price.current - history.all_time_low), cur)) + observed_note,
             "next_sale":      None,
             "next_sale_date": None,
             "est_discount":   price.discount_pct,
@@ -102,14 +131,11 @@ def get_recommendation(game: Game) -> dict:
     next_event = _next_relevant_sale(today, pub_pattern)
 
     if next_event is None:
-        # No upcoming sale found — generic advice
         if diff_pct is not None and diff_pct > 30:
             return {
                 "verdict":        "wait",
-                "headline":       "Wait for a sale",
-                "reason":         (f"Current price (${price.current:,.0f}) is "
-                                   f"{diff_pct:.0f}% above the historical low "
-                                   f"(${history.all_time_low:,.0f} {price.currency})."),
+                "headline":       _t("hl_wait"),
+                "reason":         _t("why_above_low", now=now_str, pct=round(diff_pct), low=low_str) + observed_note,
                 "next_sale":      None,
                 "next_sale_date": None,
                 "est_discount":   pub_pattern["max_discount"] if pub_pattern else None,
@@ -118,35 +144,26 @@ def get_recommendation(game: Game) -> dict:
             }
         return _no_data()
 
-    # Build estimated sale price
     est_discount = pub_pattern["max_discount"] if pub_pattern else _guess_discount(game)
     est_price    = round(price.base * (1 - est_discount / 100), 2)
-    days_away    = (datetime.strptime(next_event["start"], "%Y-%m-%d").date() - today).days
+    start_date   = datetime.strptime(next_event["start"], "%Y-%m-%d").date()
+    days_away    = (start_date - today).days
+    event_name   = _event_name(next_event["key"])
 
-    # Format event name
-    event_name = _event_name(next_event["key"])
-    event_date = datetime.strptime(next_event["start"], "%Y-%m-%d").strftime("%b %d")
-    sale_label = f"{event_name} ({event_date})"
+    from ui.format import day
+    sale_label = f"{event_name} · {day(start_date, '{d} {mon}')}"
 
-    reason_parts = [
-        f"${price.current:,.0f} {price.currency} is {diff_pct:.0f}% above the historical low."
-        if diff_pct is not None else
-        f"Current price: ${price.current:,.0f} {price.currency}.",
-    ]
+    parts = [_t("why_above_low", now=now_str, pct=round(diff_pct), low=low_str) + observed_note.strip()
+             if diff_pct is not None else _t("why_current", now=now_str)]
     if pub_pattern:
-        reason_parts.append(
-            f"{game.publisher} typically discounts up to {pub_pattern['max_discount']}% "
-            f"during seasonal sales."
-        )
-    reason_parts.append(
-        f"The {event_name} starts in {days_away} day{'s' if days_away != 1 else ''} "
-        f"— estimated price around ${est_price:,.0f}."
-    )
+        parts.append(_t("why_publisher", publisher=game.publisher, pct=pub_pattern["max_discount"]))
+    parts.append(_t("why_next_sale_one" if days_away == 1 else "why_next_sale_other",
+                    event=event_name, days=days_away, price=_m(est_price, cur)))
 
     return {
         "verdict":        "wait",
-        "headline":       f"Wait — likely on sale in {days_away} days",
-        "reason":         " ".join(reason_parts),
+        "headline":       _t("hl_wait_days_one" if days_away == 1 else "hl_wait_days_other", days=days_away),
+        "reason":         " ".join(parts),
         "next_sale":      sale_label,
         "next_sale_date": next_event["start"],
         "est_discount":   est_discount,
@@ -159,8 +176,8 @@ def get_recommendation(game: Game) -> dict:
 
 def _no_data() -> dict:
     return {
-        "verdict": "no_data", "headline": "No price data available",
-        "reason": "Add a Steam API key in Settings to get price history.",
+        "verdict": "no_data", "headline": _t("hl_no_data"),
+        "reason": _t("why_no_data_refresh"),
         "next_sale": None, "next_sale_date": None,
         "est_discount": None, "est_price": None, "confidence": "low",
     }
@@ -177,8 +194,14 @@ def _next_relevant_sale(today: date, pub_pattern: Optional[dict]) -> Optional[di
     """Find the next upcoming sale that's relevant for this publisher."""
     preferred = pub_pattern["preferred_sales"] if pub_pattern else ["summer", "winter"]
 
+    # Same event list the Deals screen uses (server JSON, config as fallback)
+    try:
+        from services.sale_images import get_sale_events
+        events = get_sale_events() or STEAM_SALE_EVENTS
+    except Exception:  # noqa: BLE001
+        events = STEAM_SALE_EVENTS
     upcoming = [
-        e for e in STEAM_SALE_EVENTS
+        e for e in events
         if datetime.strptime(e["start"], "%Y-%m-%d").date() > today
     ]
     upcoming.sort(key=lambda e: e["start"])
@@ -194,9 +217,13 @@ def _next_relevant_sale(today: date, pub_pattern: Optional[dict]) -> Optional[di
 
 
 def _event_name(key: str) -> str:
-    for fragment, name in SALE_FRIENDLY.items():
+    import i18n
+    name = i18n.t(f"sale_events.{key}")
+    if name != f"sale_events.{key}":
+        return name
+    for fragment, friendly in SALE_FRIENDLY.items():
         if fragment in key.lower():
-            return name
+            return friendly
     return key.replace("_", " ").title()
 
 
