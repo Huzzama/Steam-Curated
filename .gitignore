@@ -40,3 +40,15 @@ Thumbs.db
 dist/
 build/
 *.spec.bak
+
+# build outputs
+dist/
+build/
+.build-venv/
+packaging/appimage/*.AppDir/
+packaging/appimage/*.AppImage
+packaging/debian/*.deb
+packaging/macos/dist/
+packaging/macos/build/
+assets/icon.icns
+tools/release/

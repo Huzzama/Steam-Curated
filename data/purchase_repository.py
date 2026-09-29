@@ -8,6 +8,8 @@ import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+from dataclasses import asdict, fields
+
 from data.models import Purchase
 
 log = logging.getLogger("curator.purchases")
@@ -51,34 +53,38 @@ def _save(data: list[dict]):
         _write_json(_get_db_path(), data)
 
 
+_FIELDS = {f.name for f in fields(Purchase)}
+
+
+def _from(d: dict) -> Purchase:
+    return Purchase(**{k: v for k, v in d.items() if k in _FIELDS})
+
+
 def get_all() -> list[Purchase]:
-    return [Purchase(**d) for d in _load()]
+    return [_from(d) for d in _load()]
 
 
 def get_by_app_id(app_id: str) -> Optional[Purchase]:
     for d in _load():
         if d["app_id"] == app_id:
-            return Purchase(**d)
+            return _from(d)
     return None
 
 
 def add(purchase: Purchase) -> Purchase:
-    db = _load()
-    # Remove existing entry for same app_id (re-purchase / update)
-    db = [d for d in db if d["app_id"] != purchase.app_id]
-    db.insert(0, {
-        "app_id":       purchase.app_id,
-        "name":         purchase.name,
-        "purchased_at": purchase.purchased_at,
-        "price_paid":   purchase.price_paid,
-        "base_price":   purchase.base_price,
-        "currency":     purchase.currency,
-        "discount_pct": purchase.discount_pct,
-        "edition":      purchase.edition,
-        "saved":        purchase.saved,
-    })
-    _save(db)
+    """Insert (or replace the entry for the same app_id) at the top."""
+    with _lock:
+        db = [d for d in _load() if d["app_id"] != purchase.app_id]
+        db.insert(0, asdict(purchase))
+        _save(db)
     return purchase
+
+
+def update(purchase: Purchase) -> None:
+    """Rewrite an existing entry in place (keeps its position)."""
+    with _lock:
+        db = [asdict(purchase) if d["app_id"] == purchase.app_id else d for d in _load()]
+        _save(db)
 
 
 def delete(app_id: str):

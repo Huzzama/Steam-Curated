@@ -20,9 +20,9 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from PySide6.QtCore import QUrl, Qt
-from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtCore import QTimer, QUrl, Qt
+from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QPainter, QShortcut
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QWidget
 
 import i18n
 from config import APP_NAME, MIN_WINDOW_SIZE, WINDOW_SIZE
@@ -34,7 +34,11 @@ from ui.theme import C, SP
 log = logging.getLogger("curator.shell")
 
 SIDEBAR_WIDTH = 216
-DETAIL_WIDTH  = 340
+DETAIL_MIN, DETAIL_MAX = 340, 640
+DETAIL_WIDTH  = DETAIL_MAX          # default = widest; the user can drag the left edge narrower
+_WIDTH_KEY    = "detail_panel_width"   # (2.2's "detail_width" defaulted to 400 — ignored now)
+MAIN_MIN_WIDTH = 460                # never squeeze the view under the panel below this
+PRICE_WATCH_TICK_MS = 60 * 60 * 1000
 _W, _H = (int(x) for x in WINDOW_SIZE.split("x"))
 
 # sidebar order = slide direction between views
@@ -125,6 +129,42 @@ class Sidebar(QFrame):
         self._news.setText(i18n.t("nav.news"))
 
 
+class _PanelGrip(QWidget):
+    """Thin handle on the detail panel's left edge; drag to resize the panel."""
+
+    def __init__(self, on_drag: Callable[[int], None], on_release: Callable[[], None], parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(6)
+        self.setCursor(Qt.CursorShape.SplitHCursor)
+        self.setMouseTracking(True)
+        self._on_drag, self._on_release = on_drag, on_release
+        self._hover = self._dragging = False
+
+    def enterEvent(self, e):
+        self._hover = True; self.update()
+
+    def leaveEvent(self, e):
+        self._hover = False; self.update()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True; self.update()
+
+    def mouseMoveEvent(self, e):
+        if self._dragging:
+            self._on_drag(int(e.globalPosition().x()))
+
+    def mouseReleaseEvent(self, e):
+        if self._dragging:
+            self._dragging = False; self.update()
+            self._on_release()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        color = QColor(C["accent"] if (self._hover or self._dragging) else C["border"])
+        p.fillRect(0, 0, 2 if (self._hover or self._dragging) else 1, self.height(), color)
+
+
 class AppWindow(QMainWindow):
 
     def __init__(self):
@@ -139,6 +179,9 @@ class AppWindow(QMainWindow):
         self._active: Optional[str] = None
         self._detail_open = False
         self._detail_panel = None
+        self._detail_width = self._saved_detail_width()
+        self._watch_timer: Optional[QTimer] = None
+        self._alerts_timer: Optional[QTimer] = None      # debounced watchlist upload (Discord alerts)
 
         self._build()
         self._shortcuts()
@@ -162,10 +205,12 @@ class AppWindow(QMainWindow):
 
         self._detail = QFrame()
         self._detail.setProperty("surface", "panel")
-        self._detail.setStyleSheet(f"QFrame[surface=\"panel\"] {{ border-left: 1px solid {C['border']}; "
-                                   f"border-radius: 0; }}")
-        self._detail_lay = QVBoxLayout(self._detail)
+        self._detail.setStyleSheet("QFrame[surface=\"panel\"] { border: none; border-radius: 0; }")
+        self._detail_lay = QHBoxLayout(self._detail)
         self._detail_lay.setContentsMargins(0, 0, 0, 0)
+        self._detail_lay.setSpacing(0)
+        # the grip doubles as the panel's left border
+        self._detail_lay.addWidget(_PanelGrip(self._drag_detail, self._save_detail_width))
         self._detail.setMaximumWidth(0)
         self._detail.hide()
         root.addWidget(self._detail)
@@ -183,6 +228,8 @@ class AppWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "toasts"):
             self.toasts.relayout()
+        if getattr(self, "_detail_open", False) and getattr(self._detail, "_slide_anim", None) is None:
+            self._set_detail_width(self._fit_detail_width(self._detail_width))
 
     # ── views ────────────────────────────────────────────────────────────────
 
@@ -273,6 +320,7 @@ class AppWindow(QMainWindow):
 
     def on_data_changed(self) -> None:
         """Games or purchases changed: refresh the visible view now, others lazily."""
+        self.schedule_alert_sync()
         self._dirty |= DATA_VIEWS
         if self._active in DATA_VIEWS:
             self.refresh_active(force=True)
@@ -281,6 +329,7 @@ class AppWindow(QMainWindow):
 
     def on_locale_change(self) -> None:
         """Locale / country / currency changed in Settings."""
+        self.schedule_alert_sync()
         self.setWindowTitle(APP_NAME)
         self.sidebar.retranslate()
         self._refresh_account()
@@ -326,12 +375,138 @@ class AppWindow(QMainWindow):
         self._detail_panel.load_game(game)
         if not self._detail_open:
             self._detail_open = True
-            slide_panel(self._detail, True, DETAIL_WIDTH)
+            slide_panel(self._detail, True, self._fit_detail_width(self._detail_width))
 
     def close_detail(self) -> None:
         if self._detail_open:
             self._detail_open = False
-            slide_panel(self._detail, False, DETAIL_WIDTH)
+            slide_panel(self._detail, False, self._detail.width())
+
+    @staticmethod
+    def _saved_detail_width() -> int:
+        from ui.settings_loader import get_settings
+        try:
+            w = int(get_settings().get(_WIDTH_KEY) or DETAIL_WIDTH)
+        except (TypeError, ValueError):
+            w = DETAIL_WIDTH
+        return max(DETAIL_MIN, min(DETAIL_MAX, w))
+
+    def _fit_detail_width(self, w: int) -> int:
+        """Clamp to 340–640 and leave the main view at least MAIN_MIN_WIDTH."""
+        room = self.width() - SIDEBAR_WIDTH - MAIN_MIN_WIDTH
+        return max(DETAIL_MIN, min(DETAIL_MAX, w, room))
+
+    def _set_detail_width(self, w: int) -> None:
+        self._detail.setMinimumWidth(w)
+        self._detail.setMaximumWidth(w)
+
+    def _drag_detail(self, global_x: int) -> None:
+        if not self._detail_open or getattr(self._detail, "_slide_anim", None) is not None:
+            return
+        right = self._detail.mapToGlobal(self._detail.rect().topRight()).x()
+        self._detail_width = self._fit_detail_width(right - global_x)
+        self._set_detail_width(self._detail_width)
+
+    def _save_detail_width(self) -> None:
+        from ui.settings_loader import save_settings
+        try:
+            save_settings({_WIDTH_KEY: int(self._detail_width)})
+        except OSError as e:
+            log.warning("detail width not saved: %s", e)
+
+    # ── automatic price check (builds the deal history) ──────────────────────
+
+    def start_price_watch(self, first_delay_ms: int = 8000) -> None:
+        """Check wishlist prices now if the last check is ~a day old, then every hour
+        re-evaluate. Called by main.py (not by the screenshot tool)."""
+        if self._watch_timer is not None:
+            return
+        self._watch_timer = QTimer(self)
+        self._watch_timer.timeout.connect(self._maybe_check_prices)
+        self._watch_timer.start(PRICE_WATCH_TICK_MS)
+        QTimer.singleShot(first_delay_ms, self._maybe_check_prices)   # GUI thread → fine
+
+    def _maybe_check_prices(self) -> None:
+        from services import price_watch
+        if price_watch.is_running() or not price_watch.is_due():
+            return
+        from ui.async_bridge import run_async
+
+        def on_done(result):
+            if isinstance(result, Exception):
+                log.warning("price check failed: %s", result)
+                return
+            if result.get("skipped") or not result.get("checked"):
+                return
+            names = result.get("new_sales") or []
+            if len(names) == 1:
+                self.notify(i18n.t("watch.new_sale_one", name=names[0]), "success")
+            elif names:
+                shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
+                self.notify(i18n.t("watch.new_sale_other", n=len(names), names=shown), "success")
+            self.on_data_changed()
+            settings = self._views.get("settings")
+            if settings is not None and hasattr(settings, "_render_price_tracking"):
+                settings._render_price_tracking()
+
+        run_async(self, price_watch.check_now, on_done=on_done)
+
+    def start_purchase_sync(self, delay_ms: int = 12000) -> None:
+        """Send purchases never sent to pimpmysteam.com (offline / older versions);
+        the server verifies each one against the Steam library."""
+        def run():
+            from services import purchase_sync
+            from ui.async_bridge import run_async
+
+            def on_done(result):
+                if isinstance(result, Exception):
+                    log.info("purchase sync failed: %s", result)
+                    return
+                if result.get("sent"):
+                    self.notify(i18n.t("verify.sync_done", n=result["sent"]), "info")
+                    self.on_data_changed()
+            run_async(self, purchase_sync.sync_pending, on_done=on_done)
+        QTimer.singleShot(delay_ms, run)            # GUI thread → fine
+
+    def schedule_alert_sync(self, delay_ms: int = 20000) -> None:
+        """Upload the watchlist for Discord alerts a little after the last change
+        (only happens while alerts are linked, and only if something changed)."""
+        if self._alerts_timer is None:
+            self._alerts_timer = QTimer(self)
+            self._alerts_timer.setSingleShot(True)
+            self._alerts_timer.timeout.connect(self._push_alert_watchlist)
+        self._alerts_timer.start(delay_ms)
+
+    def _push_alert_watchlist(self) -> None:
+        from services import discord_alerts
+        from services.steamkustom_auth import get_token
+        if not get_token():
+            return
+        from ui.async_bridge import run_async
+        run_async(self, discord_alerts.push_watchlist,
+                  on_done=lambda r: log.info("alerts watchlist: %s", r))
+
+    def start_update_check(self, delay_ms: int = 12000) -> None:
+        """A little after start-up, ask GitHub (in a thread) whether there is a
+        newer release; toast once per version. Settings › About shows it too."""
+        QTimer.singleShot(delay_ms, self._check_updates)
+
+    def _check_updates(self) -> None:
+        from services import update_check
+        from ui.async_bridge import run_async
+
+        def on_done(result):
+            if isinstance(result, Exception) or not result or not result.get("newer"):
+                return
+            from ui.settings_loader import get_settings, save_settings
+            if get_settings().get("update_toasted") == result["latest"]:
+                return                      # already announced this version
+            save_settings({"update_toasted": result["latest"]})
+            self.toasts.show(i18n.t("update.available", v=result["latest"]), "info", duration_ms=8000)
+            view = self._views.get("settings")
+            if view is not None and hasattr(view, "refresh_update_row"):
+                view.refresh_update_row()
+        run_async(self, update_check.check, on_done=on_done)
 
     # ── dialogs / toasts ─────────────────────────────────────────────────────
 

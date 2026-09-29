@@ -6,16 +6,17 @@ Settings — account, sync, backup, preferences, API keys and about.
     view.retranslate()            update visible strings in place
 
 Every network call (token verification, wishlist import, Drive status and
-transfers, cover download, IsThereAnyDeal test, price refresh after a
+transfers, cover download, the daily price check, price refresh after a
 country change) goes through ui.async_bridge.run_async. Preferences save
 the moment they change — there is no "Save" button.
 """
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QComboBox, QLabel, QMessageBox, QProgressBar, QSizePolicy,
                                QWidget)
@@ -30,7 +31,7 @@ from ui.animations import clear_layout, shake
 from ui.async_bridge import run_async
 from ui.components import (Button, Card, Divider, ElidedLabel, FlowLayout, Pill, SectionHeader,
                            SubHeader, TextField, hbox, label, scroll_area, vbox)
-from ui.format import money
+from ui.format import day, money
 from ui.settings_loader import get_settings, save_settings
 from ui.theme import C, SP, repolish
 
@@ -57,9 +58,10 @@ COMPARE_REGIONS = ["mx", "us", "ar", "br", "es", "gb", "de", "fr", "jp", "au", "
                    "tr", "cn", "in"]
 DEFAULT_COMPARE = ["us", "ar", "br"]
 
-ITAD_KEYS_URL = "https://isthereanydeal.com/apps/my/"
-ITAD_TEST_APP = "1245620"          # Elden Ring — exists in every region
 APP_VERSION = getattr(config, "APP_VERSION", "2.0")
+
+
+log = logging.getLogger("curator.settings")
 
 
 class _UserFacing(Exception):
@@ -144,6 +146,8 @@ class SettingsView(QWidget):
         self._build_wishlist_sync()
         self._build_drive()
         self._build_preferences()
+        self._build_price_tracking()
+        self._build_discord_alerts()
         self._build_api_keys()
         self._build_about()
         self._col.addStretch()
@@ -271,6 +275,47 @@ class SettingsView(QWidget):
         desc.setContentsMargins(LABEL_WIDTH + SP["md"], 0, 0, 0)
         card.body.addWidget(desc)
 
+    # 4c ─ Discord alerts (checked and sent by pimpmysteam.com)
+    def _build_discord_alerts(self) -> None:
+        self._alerts: Optional[dict] = None
+        self._alerts_poll: Optional[QTimer] = None
+        card = self._section("alerts.section")
+        card.body.addWidget(self._tl("alerts.desc", "muted", wrap=True))
+        row = hbox(spacing=SP["sm"])
+        self._alerts_icon = QLabel()
+        row.addWidget(self._alerts_icon)
+        self._alerts_status = label("", "body", elide=True)
+        row.addWidget(self._alerts_status, 1)
+        self._alerts_link_btn = self._tb("alerts.link", variant="primary", icon="link", on_click=self._link_discord)
+        row.addWidget(self._alerts_link_btn)
+        self._alerts_unlink_btn = self._tb("alerts.unlink", variant="ghost", icon="log-out",
+                                           on_click=self._unlink_discord)
+        row.addWidget(self._alerts_unlink_btn)
+        card.body.addLayout(row)
+
+        self._alerts_opts = QWidget()
+        ol = vbox(self._alerts_opts, spacing=SP["sm"])
+        chips_box = QWidget()
+        flow = FlowLayout(chips_box, SP["xs"], SP["xs"])
+        self._alert_chips: dict[str, Button] = {}
+        for key in ("enabled", "on_sale", "at_low", "daily_digest", "sale_events"):
+            b = self._tb(f"alerts.opt_{key}", variant="chip",
+                         on_click=lambda _=False, k=key: self._toggle_alert(k))
+            b.setProperty("active", "false")
+            self._alert_chips[key] = b
+            flow.addWidget(b)
+        ol.addWidget(chips_box)
+        trow = hbox(spacing=SP["sm"])
+        self._alerts_test_btn = self._tb("alerts.test", icon="bell", on_click=self._test_discord)
+        trow.addWidget(self._alerts_test_btn)
+        self._alerts_watched = label("", "muted", elide=True)
+        trow.addWidget(self._alerts_watched, 1)
+        ol.addLayout(trow)
+        card.body.addWidget(self._alerts_opts)
+        self._alerts_error = label("", "muted", color=C["red"], wrap=True)
+        card.body.addWidget(self._alerts_error)
+        self._render_alerts()
+
     # 5 ─ api keys
     def _build_api_keys(self) -> None:
         card = self._section("settings.api_keys")
@@ -285,24 +330,26 @@ class SettingsView(QWidget):
         row.addWidget(self._covers_btn)
         card.body.addLayout(row)
 
-        card.body.addWidget(Divider())
 
-        head = hbox(spacing=SP["sm"])
-        head.addWidget(self._tl("settings.itad_key", "body"))
-        head.addStretch()
-        link = self._tb("settings.itad_link", variant="link", icon="external-link",
-                        on_click=lambda: QDesktopServices.openUrl(QUrl(ITAD_KEYS_URL)))
-        link.setToolTip(ITAD_KEYS_URL)
-        head.addWidget(link)
-        card.body.addLayout(head)
-        card.body.addWidget(self._tl("settings.itad_desc", "muted", wrap=True))
-        row = hbox(spacing=SP["sm"])
-        self._itad_key = TextField("", icon="key-round", password=True)
-        self._itad_key.editingFinished.connect(lambda: self._save_key("itad_key", self._itad_key))
-        self._itad_key.textChanged.connect(lambda _t: self._itad_key.set_error(False))
-        row.addWidget(self._itad_key, 1)
-        self._itad_test_btn = self._tb("settings.test", icon="zap", on_click=self._test_itad)
-        row.addWidget(self._itad_test_btn)
+    # 4b ─ price tracking (builds the deal history the advice is based on)
+    def _build_price_tracking(self) -> None:
+        card = self._section("settings.price_tracking")
+        card.body.addWidget(self._tl("settings.price_tracking_desc", "muted", wrap=True))
+        row = hbox(spacing=SP["md"])
+        lbl = self._tl("settings.last_check")
+        lbl.setFixedWidth(LABEL_WIDTH)
+        row.addWidget(lbl)
+        self._last_check = label("", "mono", elide=True)
+        row.addWidget(self._last_check, 1)
+        self._check_btn = self._tb("settings.check_now", icon="refresh-cw", on_click=self._check_prices)
+        row.addWidget(self._check_btn)
+        card.body.addLayout(row)
+        row = hbox(spacing=SP["md"])
+        lbl = self._tl("settings.tracked")
+        lbl.setFixedWidth(LABEL_WIDTH)
+        row.addWidget(lbl)
+        self._tracked = label("", "mono", elide=True)
+        row.addWidget(self._tracked, 1)
         card.body.addLayout(row)
 
     # 6 ─ about
@@ -313,6 +360,19 @@ class SettingsView(QWidget):
         name_row.addWidget(Pill(f"v{APP_VERSION}", "accent"))
         name_row.addStretch()
         card.body.addLayout(name_row)
+
+        # ── updates: "2.1.0 available — Download" / "Check for updates" ──
+        urow = hbox(spacing=SP["sm"])
+        self._update_status = label("", "muted", elide=True)
+        urow.addWidget(self._update_status, 1)
+        self._update_dl_btn = Button("", variant="primary", icon="download", on_click=self._download_update)
+        urow.addWidget(self._update_dl_btn)
+        self._update_check_btn = self._tb("update.check", variant="ghost", icon="refresh-cw",
+                                          on_click=self._check_updates_now)
+        urow.addWidget(self._update_check_btn)
+        card.body.addLayout(urow)
+        self._update_info: Optional[dict] = None
+        self.refresh_update_row()
 
         for key, path in (("settings.data_folder", config.BASE_DIR),
                           ("settings.logs_folder", config.BASE_DIR / "logs")):
@@ -336,7 +396,11 @@ class SettingsView(QWidget):
         self._update_sync_state()
         self._sync_prefs()
         self._sgdb_key.setText(self._settings.get("steamgriddb_key", "") or "")
-        self._itad_key.setText(self._settings.get("itad_key", "") or "")
+        self._render_price_tracking()
+        if force or self._alerts is None:
+            self._refresh_alerts()
+        else:
+            self._render_alerts()
         if force or self._drive_status is None:
             self._check_drive()
         else:
@@ -352,8 +416,43 @@ class SettingsView(QWidget):
             chip.setText(t(f"regions.{cc}"))
         self._render_account()
         self._render_drive()
+        self._render_price_tracking()
+        self._render_alerts()
 
     # ── helpers ──────────────────────────────────────────────────────────────
+
+    # ── updates ──────────────────────────────────────────────────────────────
+    def refresh_update_row(self, info: Optional[dict] = None) -> None:
+        from services import update_check
+        info = info or update_check.latest_known()
+        self._update_info = info
+        newer = bool(info and info.get("newer"))
+        self._update_dl_btn.setText(i18n.t("update.download", v=info["latest"]) if newer else "")
+        self._update_dl_btn.setVisible(newer)
+        self._update_status.setText(i18n.t("update.available", v=info["latest"]) if newer
+                                    else (i18n.t("update.latest") if info else ""))
+
+    def _check_updates_now(self) -> None:
+        if "update" in self._busy:
+            return
+        from services import update_check
+        self._busy.add("update")
+        self._update_check_btn.set_loading(True)
+
+        def on_done(result):
+            self._busy.discard("update")
+            self._update_check_btn.set_loading(False)
+            if isinstance(result, Exception) or result is None:
+                self._notify(i18n.t("update.failed"), "error")
+                return
+            self.refresh_update_row(result)
+            if not result.get("newer"):
+                self._notify(i18n.t("update.latest"), "success")
+        run_async(self, lambda: update_check.check(force=True), on_done=on_done)
+
+    def _download_update(self) -> None:
+        if self._update_info and self._update_info.get("url"):
+            QDesktopServices.openUrl(QUrl(self._update_info["url"]))
 
     def _notify(self, message: str, tone: str = "info") -> None:
         if self._notify_dep:
@@ -755,68 +854,212 @@ class SettingsView(QWidget):
 
         run_async(self, work, on_done=on_done, on_progress=on_progress)
 
-    def _test_itad(self) -> None:
-        if "itad" in self._busy:
+    # ── Discord alerts ───────────────────────────────────────────────────────
+
+    def _refresh_alerts(self) -> None:
+        if not auth.is_connected() or "alerts" in self._busy:
+            self._render_alerts()
             return
-        from services import price_history
-        t = i18n.t
-        key = self._itad_key.text().strip()
-        if not key:
-            self._itad_key.set_error(True)
-            shake(self._itad_key)
-            self._notify(t("settings.itad_missing"), "warning")
-            return
-        self._save_key("itad_key", self._itad_key)
-        country = self._country()
-        self._busy.add("itad")
-        self._itad_test_btn.set_loading(True)
+        from services import discord_alerts
+        self._busy.add("alerts")
 
         def on_done(result):
-            self._busy.discard("itad")
-            self._itad_test_btn.set_loading(False)
+            self._busy.discard("alerts")
             if isinstance(result, Exception):
-                self._notify(t("settings.itad_error", msg=self._error_text(result)), "error")
-                return
-            if result is None or not getattr(result, "all_time_low", 0):
-                self._notify(t("settings.itad_no_data"), "warning")
-                return
-            price = money(result.all_time_low, CURRENCY_OF.get(country, "USD"))
-            self._notify(t("settings.itad_ok", price=price), "success")
-            self._fill_history(country)
+                log.info("alerts status: %s", result)
+                self._alerts = {"error": self._error_text(result)}
+            else:
+                self._alerts = result
+                if result.get("linked"):
+                    self._stop_alert_poll()
+            self._render_alerts()
 
-        run_async(self, lambda: price_history.get_price_history(ITAD_TEST_APP, country.upper(), key=key, force=True),
-                  on_done=on_done)
+        run_async(self, discord_alerts.status, on_done=on_done)
 
-    def _fill_history(self, country: str) -> None:
-        """Pull all-time lows for the whole wishlist right after a key is verified."""
-        if "history" in self._busy:
-            return
-        from services import price_history
-        import data.repository as repo
+    def _render_alerts(self) -> None:
         t = i18n.t
-        self._busy.add("history")
+        a = self._alerts or {}
+        connected = auth.is_connected()
+        linked = bool(a.get("linked"))
+        configured = a.get("configured", True)
+        if not connected:
+            status, color, icon = t("alerts.needs_account"), C["text_muted"], "info"
+        elif a.get("error"):
+            status, color, icon = a["error"], C["red"], "cloud-off"
+        elif not configured:
+            missing = ", ".join(a.get("missing_config") or [])
+            status = t("alerts.not_configured") + (f" ({missing})" if missing else "")
+            color, icon = C["text_muted"], "info"
+        elif linked:
+            status, color, icon = t("alerts.linked_as", name=a.get("discord_username") or "Discord"), \
+                C["green"], "badge-check"
+        elif self._alerts is None:
+            status, color, icon = t("alerts.checking"), C["text_muted"], "loader-circle"
+        else:
+            status, color, icon = t("alerts.not_linked"), C["text_dim"], "bell"
+        self._alerts_icon.setPixmap(icons.pixmap(icon, color, 16))
+        self._alerts_status.setText(status)
+        can_link = connected and configured and self._alerts is not None and not a.get("error")
+        self._alerts_link_btn.setVisible(can_link and not linked)
+        self._alerts_unlink_btn.setVisible(connected and linked)
+        self._alerts_opts.setVisible(connected and linked)
+        for key, chip in self._alert_chips.items():
+            chip.setProperty("active", "true" if a.get(key) else "false")
+            repolish(chip)
+        n = int(a.get("watched") or 0)
+        self._alerts_watched.setText(t("alerts.watched", n=n, cc=str(a.get("country") or "").upper())
+                                     if linked else "")
+        err = a.get("last_error") if linked else None
+        self._alerts_error.setText(t(f"alerts.error_{err}") if err in ("dm_closed", "not_in_server", "discord_error")
+                                   else "")
+        self._alerts_error.setVisible(bool(self._alerts_error.text()))
 
-        def work():
-            games = [g for g in repo.get_all() if g.app_id]
-            hists = price_history.get_price_histories(games, country.upper(), force=True)
-            changed = []
-            for g in games:
-                merged = price_history.merge(g.price_history, hists.get(str(g.app_id)))
-                if merged is not None and merged != g.price_history:
-                    g.price_history = merged
-                    changed.append(g)
-            if changed:
-                repo.update_many(changed)
-            return len(changed), len(games)
+    def _link_discord(self) -> None:
+        """Discord is linked on pimpmysteam.com (Settings › Alerts): open it and
+        watch for the link to show up."""
+        from services import discord_alerts
+        QDesktopServices.openUrl(QUrl(discord_alerts.web_settings_url()))
+        self._notify(i18n.t("alerts.link_opened"), "info")
+        self._start_alert_poll()
+
+    def _start_alert_poll(self) -> None:
+        """While the website is open (sign-in + Discord consent), re-check every 5 s (max 10 min)."""
+        self._stop_alert_poll()
+        self._alerts_poll = QTimer(self)
+        self._alerts_poll.setProperty("ticks", 0)
+
+        def tick():
+            n = int(self._alerts_poll.property("ticks") or 0) + 1
+            self._alerts_poll.setProperty("ticks", n)
+            if n > 120:
+                self._stop_alert_poll()
+                return
+            self._refresh_alerts()
+        self._alerts_poll.timeout.connect(tick)
+        self._alerts_poll.start(5000)
+
+    def _stop_alert_poll(self) -> None:
+        if self._alerts_poll is not None:
+            self._alerts_poll.stop()
+            self._alerts_poll.deleteLater()
+            self._alerts_poll = None
+            self._push_alert_watchlist()          # first upload right after linking
+
+    def _push_alert_watchlist(self) -> None:
+        from services import discord_alerts
 
         def on_done(result):
-            self._busy.discard("history")
             if isinstance(result, Exception):
-                self._notify(t("settings.history_failed", msg=self._error_text(result)), "error")
-                return
-            n, total = result
-            self._notify(t("settings.history_done", n=n, total=total), "success")
-            if n:
-                self._on_data_changed()
+                log.info("watchlist upload failed: %s", result)
+            self._refresh_alerts_quiet()
 
-        run_async(self, work, on_done=on_done)
+        run_async(self, lambda: discord_alerts.push_watchlist(force=True), on_done=on_done)
+
+    def _refresh_alerts_quiet(self) -> None:
+        if (self._alerts or {}).get("linked"):
+            self._refresh_alerts()
+
+    def _unlink_discord(self) -> None:
+        t = i18n.t
+        if QMessageBox.question(self, t("alerts.unlink"), t("alerts.unlink_confirm")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        from services import discord_alerts
+
+        def on_done(result):
+            if isinstance(result, Exception):
+                self._notify(self._error_text(result), "error")
+            else:
+                self._notify(t("alerts.unlinked"), "success")
+            self._refresh_alerts()
+
+        run_async(self, discord_alerts.unlink, on_done=on_done)
+
+    def _toggle_alert(self, key: str) -> None:
+        a = self._alerts or {}
+        if not a.get("linked") or "alerts_set" in self._busy:
+            return
+        from services import discord_alerts
+        new = not bool(a.get(key))
+        a[key] = new                               # optimistic; reverted on error
+        self._render_alerts()
+        self._busy.add("alerts_set")
+
+        def on_done(result):
+            self._busy.discard("alerts_set")
+            if isinstance(result, Exception):
+                a[key] = not new
+                self._notify(self._error_text(result), "error")
+            else:
+                self._alerts = result
+            self._render_alerts()
+
+        run_async(self, lambda: discord_alerts.update(**{key: new}), on_done=on_done)
+
+    def _test_discord(self) -> None:
+        if "alerts_test" in self._busy:
+            return
+        from services import discord_alerts
+        self._busy.add("alerts_test")
+        self._alerts_test_btn.set_loading(True)
+
+        def on_done(result):
+            self._busy.discard("alerts_test")
+            self._alerts_test_btn.set_loading(False)
+            if isinstance(result, ApiError) and result.status == 409:
+                self._notify(i18n.t("alerts.error_dm_closed"), "error")
+            elif isinstance(result, Exception):
+                self._notify(self._error_text(result), "error")
+            else:
+                self._notify(i18n.t("alerts.test_sent"), "success")
+            self._refresh_alerts()
+
+        run_async(self, discord_alerts.send_test, on_done=on_done)
+
+    def _render_price_tracking(self) -> None:
+        from datetime import datetime
+        from services import deal_history, price_watch
+        t = i18n.t
+        ts = price_watch.last_check()
+        if ts:
+            dt = datetime.fromtimestamp(ts)
+            self._last_check.setText(f"{day(dt)} · {dt:%H:%M}")
+        else:
+            self._last_check.setText(t("settings.last_check_never"))
+        games, sales = deal_history.summary()
+        self._tracked.setText(t("settings.tracked_value", n=games, sales=sales))
+
+    def _check_prices(self) -> None:
+        """Run the daily price check now (same code the automatic one uses)."""
+        if "watch" in self._busy:
+            return
+        from services import price_watch
+        t = i18n.t
+        self._busy.add("watch")
+        self._check_btn.set_loading(True)
+
+        def on_progress(p):
+            cur, total = p
+            self._check_btn.set_loading(False)
+            self._check_btn.setText(t("settings.check_progress", cur=cur, total=total))
+            self._check_btn.setEnabled(False)
+
+        def on_done(result):
+            self._busy.discard("watch")
+            self._check_btn.set_loading(False)
+            self._check_btn.setEnabled(True)
+            self._check_btn.setText(t("settings.check_now"))
+            if isinstance(result, Exception):
+                self._notify(t("settings.check_failed", msg=self._error_text(result)), "error")
+                return
+            self._render_price_tracking()
+            if result.get("skipped"):
+                return
+            if result["checked"] == 0 and result["failed"]:
+                self._notify(t("settings.check_failed", msg=t("settings.check_offline")), "error")
+                return
+            self._notify(t("settings.check_done", n=result["checked"], sale=result["on_sale"]), "success")
+            self._on_data_changed()
+
+        run_async(self, lambda progress: price_watch.check_now(lambda c, n: progress((c, n))),
+                  on_done=on_done, on_progress=on_progress)

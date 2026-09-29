@@ -115,11 +115,16 @@ current filter only; reuse widgets by clearing the layout
 - `services.steam_api`: `refresh_price(app_id, country, force)`,
   `bulk_refresh_prices(...)` (read its signature), `search_games(query, limit,
   cc)`, `get_game_metadata(app_id, country)`, `get_app_details`.
-- `services.price_history`: `get_price_history(app_id, country, force, currency)`
-  (ITAD when configured, else observed local low; never returns worse data),
+- `services.price_history`: `get_price_history(app_id, price=…)` derives the
+  all-time low from the deal history in the game's currency,
   `get_price_histories(games, country)` batched, `observe(app_id, price)`,
-  `merge(old, new)`; `PriceHistory.source` is "itad" | "observed".
-- `services.recommendation.get_recommendation(game) → dict` (read keys).
+  `merge(old, new)`; `PriceHistory.source` is "history" | "observed".
+- `services.price_watch`: `is_due()`, `last_check()`, `check_now(on_progress)`
+  (blocking — run it with `run_async`); the shell runs it daily.
+- `services.recommendation.get_recommendation(game) → dict` — verdict
+  (buy_now · good_deal · wait · fair · no_data), headline, reason, next sale,
+  est. price, probability, confidence, `stats`, `episodes` (see its docstring);
+  built on `services.deal_predictor` + `services.deal_history`.
 - `services.steam_wishlist.import_wishlist(steam_id64, api_key, country,
   on_progress(i, total, app_id), skip_existing) → {"added","skipped","errors","total"}`.
 - `services.steamkustom_auth`: `is_connected()`, `get_username()`,
@@ -138,7 +143,7 @@ current filter only; reuse widgets by clearing the layout
 - `services.bundle_api.get_bundles_enriched(app_id, country)` (slow — async).
 - `ui.settings_loader`: `get_settings()`, `get(key, default)`,
   `save_settings(partial_dict)`; keys `locale, country, timezone,
-  steamgriddb_key, itad_key, compare_regions`.
+  steamgriddb_key, compare_regions, last_price_check, detail_panel_width`.
 - Errors: `services._http.ApiError(status, message)`, `Unreachable`.
 
 ## Known bugs to fix while rebuilding (from the audit)

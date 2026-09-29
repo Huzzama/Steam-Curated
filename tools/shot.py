@@ -7,6 +7,7 @@ Headless screenshot of one view / dialog with sample data.
     QT_QPA_PLATFORM=offscreen python3 tools/shot.py purchase /tmp/shots/purchase.png
 
 Options: --locale es  --size 1200x720  --delay 900 (ms before grabbing)
+         --mxn (prices in MXN ×20, long genre/developer lists — overflow check)
 Data lives in a throw-away folder so the real wishlist.json is never touched.
 """
 from __future__ import annotations
@@ -40,16 +41,21 @@ _GAMES = [
 ]
 
 
-def make_fixture(folder: Path) -> None:
+def make_fixture(folder: Path, mxn: bool = False) -> None:
     games = []
+    currency, k = ("MXN", 20) if mxn else ("USD", 1)
     for i, (name, appid, genre, year, dev, prio, cur, base, disc, low, low_date, low_disc, play) in enumerate(_GAMES, 1):
+        cur, base, low = round(cur * k, 2), round(base * k, 2), round(low * k, 2)
+        if mxn and appid == "1245620":
+            genre = "Action, RPG, Adventure, Open World, Souls-like"
+            dev = "FromSoftware Inc., Bandai Namco Entertainment, QLOC S.A."
         games.append({
             "id": i, "name": name, "app_id": appid,
             "steam_url": f"https://store.steampowered.com/app/{appid}",
             "genre": genre, "release_year": year, "developer": dev, "publisher": dev,
             "categories": "Single-player", "short_description": f"{name} — sample description for the screenshot tool.",
             "priority": prio, "status": "Purchased" if i in (4, 11) else "Wishlist",
-            "price": {"current": cur, "base": base, "currency": "USD", "discount_pct": disc, "is_on_sale": disc > 0},
+            "price": {"current": cur, "base": base, "currency": currency, "discount_pct": disc, "is_on_sale": disc > 0},
             "price_history": None if low == 0 else {"all_time_low": low, "all_time_low_date": low_date,
                                                    "all_time_discount": low_disc, "last_sale_price": None, "last_sale_date": None},
             "personal_rating": None, "notes": "", "cover_path": None,
@@ -65,7 +71,19 @@ def make_fixture(folder: Path) -> None:
          "base_price": 14.99, "currency": "USD", "discount_pct": 25, "edition": "Standard", "saved": 3.75},
     ]
     (folder / "purchases.json").write_text(json.dumps(purchases, indent=2), encoding="utf-8")
-    (folder / "settings.json").write_text(json.dumps({"locale": "en", "country": "us", "timezone": "GMT-6",
+    # deal history: seasonal discounter + a frequent one, so the advice panel has data
+    evs = {}
+    for appid, cuts in (("1245620", (40, 50, 60)), ("1145350", (20, 25, 30)), ("1086940", (20, 25, 30))):
+        rows = []
+        for y, c in zip((2023, 2024, 2025), cuts):
+            rows += [[f"{y}-06-27", c, "seen"], [f"{y}-07-11", 0, "seen"],
+                     [f"{y}-11-26", c, "seen"], [f"{y}-12-03", 0, "seen"],
+                     [f"{y}-12-19", c + 5, "seen"], [f"{y + 1}-01-02", 0, "seen"]]
+        rows += [["2026-06-25", cuts[-1], "seen"], ["2026-07-09", 0, "seen"]]
+        evs[appid] = {"events": [["2023-06-01", 0, "seen"]] + rows}
+    (folder / "deal_history.json").write_text(json.dumps({"version": 1, "games": evs}), encoding="utf-8")
+    (folder / "settings.json").write_text(json.dumps({"locale": "en", "country": "mx" if mxn else "us",
+                                                      "timezone": "GMT-6", "last_price_check": 1790000000,
                                                       "compare_regions": ["us", "mx", "ar"]}), encoding="utf-8")
 
 
@@ -76,11 +94,14 @@ def main() -> None:
     ap.add_argument("--locale", default="en")
     ap.add_argument("--size", default="1200x720")
     ap.add_argument("--delay", type=int, default=900)
+    ap.add_argument("--mxn", action="store_true")
+    ap.add_argument("--scroll", type=int, default=0, help="detail: scroll the panel down N px")
+    ap.add_argument("--panel", type=int, default=0, help="detail: panel width in px")
     args = ap.parse_args()
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     tmp = Path(tempfile.mkdtemp(prefix="curator_shot_"))
-    make_fixture(tmp)
+    make_fixture(tmp, args.mxn)
 
     import config
     config.BASE_DIR = tmp                       # repositories & settings read this lazily
@@ -126,6 +147,25 @@ def main() -> None:
             sys.exit(f"unknown target {t!r}; views: {VIEW_KEYS}")
 
     def grab():
+        if args.target == "detail" and win._detail_panel is not None:
+            if args.panel:
+                win._detail_width = win._fit_detail_width(args.panel)
+                win._set_detail_width(win._detail_width)
+                app.processEvents()
+            if args.mxn:                     # offline sandbox: sample region prices + rates
+                from data.models import PriceInfo
+                pnl = win._detail_panel
+                pnl._fx = ({"USD": 1.0, "MXN": 18.4, "ARS": 1360.0, "GBP": 0.74, "JPY": 148.0},
+                           {"source": "live", "date": "2026-09-28"})
+                pnl._region_order = ["mx", "us", "ar", "gb", "jp"]
+                pnl._render_regions({"mx": pnl._game.price,
+                                     "us": PriceInfo(35.99, 59.99, "USD", 40, True),
+                                     "ar": PriceInfo(38.99, 64.99, "USD", 40, True),
+                                     "gb": PriceInfo(29.99, 49.99, "GBP", 40, True),
+                                     "jp": PriceInfo(5391, 8986, "JPY", 40, True)})
+                app.processEvents()
+            win._detail_panel._scroll.verticalScrollBar().setValue(args.scroll)
+            app.processEvents()
         target = dlg if dlg is not None else win
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         target.grab().save(args.out)

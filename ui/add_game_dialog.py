@@ -5,7 +5,7 @@ Add a Steam game to the wishlist.
 
 Search-as-you-type (300 ms debounce) against services.steam_api.search_games,
 or paste an AppID / store URL. Picking a result fetches the store details,
-current price and (when IsThereAnyDeal is configured) the all-time low, all
+current price and the all-time low known from the deal history, all
 through run_async. Confirming builds a data.models.Game, saves it and starts
 the cover download on the parent window so it outlives the dialog.
 """
@@ -279,7 +279,7 @@ class AddGameDialog(QDialog):
             meta["app_id"] = app_id
             meta["steam_url"] = f"https://store.steampowered.com/app/{app_id}"
             price = steam.parse_price(data)
-            hist = price_history.get_price_history(app_id, country=cc)
+            hist = price_history.get_price_history(app_id, price=price)
             return meta, price, hist
 
         def on_done(result):
@@ -399,8 +399,7 @@ class AddGameDialog(QDialog):
             if game.price is not None:
                 price_history.observe(app_id, game.price)
             if game.price_history is None:
-                game.price_history = price_history.get_price_history(
-                    app_id, country=cc, currency=game.price.currency if game.price else None)
+                game.price_history = price_history.get_price_history(app_id, price=game.price)
             repo.add(game)
             return game
 

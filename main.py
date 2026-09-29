@@ -63,10 +63,55 @@ def _auto_sync_drive_exit():
     t.join(timeout=6)
 
 
+def _self_test() -> int:
+    """`--self-test`: check the bundled resources and build the whole UI
+    offscreen. The release pipeline runs it on every packaged build."""
+    import os
+    from config import APP_VERSION, BUNDLE_DIR
+    problems = []
+    for rel in ("locales/en.json", "locales/es.json", "assets/fonts/Inter-Regular.ttf",
+                "assets/fonts/SpaceMono-Bold.ttf", "assets/fonts/BebasNeue-Regular.ttf", "VERSION"):
+        if not (BUNDLE_DIR / rel).exists():
+            problems.append(f"missing resource: {BUNDLE_DIR / rel}")
+    if APP_VERSION == "0.0.0":
+        problems.append("VERSION not readable")
+    from PySide6.QtWidgets import QApplication
+    from ui import theme
+    from ui.app_window import AppWindow
+    app = QApplication.instance() or QApplication(sys.argv)
+    theme.apply(app)
+    window = AppWindow()
+    window.show()
+    app.processEvents()
+    for key in ("wishlist", "deals", "settings"):
+        try:
+            window.show_view(key)
+            app.processEvents()
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"view {key}: {type(e).__name__}: {e}")
+    window.close()
+    msg = ("SELF-TEST FAILED\n  " + "\n  ".join(problems)) if problems \
+        else f"SELF-TEST OK — Steam Curator {APP_VERSION}"
+    print(msg)
+    # Windowed builds (Windows .exe, macOS .app) have no console: CI reads this file.
+    if os.environ.get("CURATOR_SELFTEST_LOG"):
+        with open(os.environ["CURATOR_SELFTEST_LOG"], "w", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    return 1 if problems else 0
+
+
 def main():
-    _setup_logging()
+    if "--version" in sys.argv:
+        from config import APP_VERSION
+        print(APP_VERSION)
+        return
     settings = load_settings()
     i18n.load_locale(settings.get("locale", "es"))
+    if "--self-test" in sys.argv:
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        sys.exit(_self_test())
+    _setup_logging()
 
     # Background Drive sync on startup
     _auto_sync_drive_startup()
@@ -92,8 +137,26 @@ def main():
     app.setApplicationName("Steam Curator")
     theme.apply(app)          # fonts, palette, global stylesheet
 
+    # Older versions stored absolute lows from a third-party API (often in USD);
+    # re-derive every low from the deal history in the game's own currency.
+    try:
+        from services import price_history
+        n = price_history.recompute_all()
+        if n:
+            log.info("re-derived %d all-time lows in local currency", n)
+    except Exception as e:  # noqa: BLE001
+        log.warning("low recompute skipped: %s", e)
+
     window = AppWindow()
     window.show()
+    # Daily price check → every sale lands in the deal history (services.price_watch)
+    window.start_price_watch()
+    # Purchases not yet on pimpmysteam.com → sent and verified against the Steam library
+    window.start_purchase_sync()
+    # Discord alerts: re-upload the watchlist if it changed while the app was closed
+    window.schedule_alert_sync(15000)
+    # New release on GitHub? (once a day, never blocks, toast + Settings › About)
+    window.start_update_check()
 
     # macOS: explicitly activate the app so all views get proper focus/paint events.
     # Without this, views opened after launch (Deals, Dashboard, etc.) can appear

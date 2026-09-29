@@ -21,6 +21,9 @@ def data_dir(tmp_path, monkeypatch):
     (tmp_path / "assets" / "covers").mkdir(parents=True)
     repo._invalidate()
     prepo.invalidate()
+    from services import deal_history, price_history
+    deal_history.reset_cache()
+    price_history._log_cache = None
     if hasattr(sl, "_cache"):
         sl._cache = None
     yield tmp_path

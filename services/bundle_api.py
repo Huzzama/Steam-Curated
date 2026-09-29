@@ -212,11 +212,12 @@ def get_editions_for_app(app_id: str, country: str = "mx") -> list[dict]:
             seen_keys.add(key)
 
             editions.append({
-                "name":     name,
-                "current":  cur,
-                "base":     base_p,
-                "discount": disc,
-                "currency": currency,
+                "name":       name,
+                "current":    cur,
+                "base":       base_p,
+                "discount":   disc,
+                "currency":   currency,
+                "package_id": str(sub.get("packageid") or ""),   # → its apps, for verification
             })
 
     if not editions:

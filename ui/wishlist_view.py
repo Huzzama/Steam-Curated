@@ -41,7 +41,6 @@ SORTS = ("priority", "name", "price", "discount", "added")
 
 _CHUNK = 16              # cards built per timer tick (~60 ms)
 _SEARCH_DEBOUNCE = 150   # ms
-_LOW_TOLERANCE = 1.05    # "at all-time low" = within 5 % of the low (same rule as GameCard)
 _PRIO_PREFIX = re.compile(r"^[SABC]\s*[—–-]\s*")
 _STATS_4COL_MIN = 940    # view width below which the stat tiles wrap 2 × 2
 
@@ -55,8 +54,7 @@ def _on_sale(g: Game) -> bool:
 
 
 def _at_low(g: Game) -> bool:
-    p, h = g.price, g.price_history
-    return p is not None and h is not None and h.all_time_low > 0 and p.current <= h.all_time_low * _LOW_TOLERANCE
+    return g.is_at_low          # on sale now at its lowest recorded price (models.Game)
 
 
 def _money_fit(amount: float, currency: str) -> str:

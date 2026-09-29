@@ -50,6 +50,59 @@ def _num(text: str) -> Optional[float]:
         return None
 
 
+def _error_brief(err: Exception) -> str:
+    """'HTTP 500 · ref 56d758c8d990' / 'offline' — enough to find it in the server logs."""
+    import json
+    from services._http import ApiError, Unreachable
+    if isinstance(err, Unreachable):
+        return "offline"
+    if isinstance(err, ApiError):
+        ref = ""
+        try:
+            ref = json.loads(str(err)).get("ref") or ""
+        except (ValueError, AttributeError):
+            pass
+        return f"HTTP {err.status}" + (f" · ref {ref}" if ref else "")
+    return type(err).__name__
+
+
+def verify_purchase(window, purchase: Purchase, quiet: bool = False) -> None:
+    """Send *purchase* to pimpmysteam.com in the background; the server checks it
+    against the Steam library and the result is stored + announced with a toast.
+    *window* is the AppWindow (owner of the async job, provides notify/on_data_changed)."""
+    from services import purchase_sync
+    from services.steamkustom_auth import get_token
+    if window is None or not get_token() or not purchase_sync.sendable(purchase):
+        return
+    notify = getattr(window, "notify", None) or (lambda *_a: None)
+
+    def on_done(result):
+        t = i18n.t
+        if isinstance(result, Exception):
+            log.info("purchase not sent: %s", result)
+            if not quiet:
+                notify(f"{t('verify.send_failed')} ({_error_brief(result)})", "warning")
+            if hasattr(window, "on_data_changed"):
+                window.on_data_changed()
+            return
+        items = result.verified_items or []
+        games = [i for i in items if i.get("state") in ("owned", "missing")]
+        owned = sum(1 for i in games if i.get("state") == "owned")
+        status = result.verification
+        if status == "verified":
+            notify(t("verify.toast_verified", name=result.name), "success")
+        elif status == "partial":
+            notify(t("verify.toast_partial", n=owned, total=len(games)), "warning")
+        elif status == "unverified":
+            notify(t("verify.toast_unverified", name=result.name), "error")
+        elif not quiet:
+            notify(t("verify.toast_unknown"), "info")
+        if hasattr(window, "on_data_changed"):
+            window.on_data_changed()
+
+    run_async(window, lambda: purchase_sync.send(purchase), on_done=on_done)
+
+
 class MarkPurchasedDialog(QDialog):
     """Purchase form with Individual / Editions / Bundles sources."""
 
@@ -61,6 +114,7 @@ class MarkPurchasedDialog(QDialog):
         self._items: dict[str, Optional[list[dict]]] = {"editions": None, "bundles": None}
         self._loading: set[str] = set()
         self._selected: Optional[dict] = None
+        self._selected_key: Optional[str] = None          # "editions" | "bundles"
         self._rows: dict[str, list[tuple[ListRow, QLabel]]] = {"editions": [], "bundles": []}
         self._saving = False
 
@@ -308,6 +362,7 @@ class MarkPurchasedDialog(QDialog):
             else:
                 chk.clear()
         self._selected = item
+        self._selected_key = key
         if key == "editions":
             self._fill(item.get("current"), item.get("base"), item.get("currency"), item.get("name"))
         else:
@@ -407,27 +462,40 @@ class MarkPurchasedDialog(QDialog):
         disc = round(saved / base * 100) if base > 0 else 0
         edition = self._edition.text().strip() or i18n.t("mark_purchased.standard_edition")
         game = self._game
+        # what was bought: the game alone, an edition (a Steam package) or a bundle —
+        # the server checks every game of it against the Steam library
+        sel = self._selected if (self._tab != "individual" and self._selected_key == self._tab) else None
+        kind, items, package_id = "game", [], ""
+        if sel and self._tab == "bundles":
+            kind = "bundle"
+            items = [{"app_id": str(a.get("id")), "name": a.get("name", "")} for a in sel.get("apps") or []]
+        elif sel and self._tab == "editions" and sel.get("package_id"):
+            kind, package_id = "edition", sel["package_id"]
         purchase = Purchase(
             app_id=game.app_id, name=game.name,
             purchased_at=self._date.date().toString("yyyy-MM-dd"),
             price_paid=round(price, 2), base_price=round(base, 2), currency=currency,
             discount_pct=int(disc), edition=edition, saved=round(saved, 2),
+            kind=kind, items=items, saving_reported=False,
         )
+        country = get_settings().get("country", "us") or "us"
 
         self._saving = True
         self._confirm.set_loading(True, i18n.t("mark_purchased.saving"))
 
         def work():
+            if package_id:
+                try:
+                    from services import bundle_api
+                    pkg = bundle_api.get_package_details(package_id, country=country) or {}
+                    purchase.items = [{"app_id": str(a["id"]), "name": a.get("name", "")}
+                                      for a in pkg.get("apps") or []]
+                except Exception as e:  # noqa: BLE001 — the game itself is still verified
+                    log.info("edition apps not resolved: %s", e)
             purchases.add(purchase)
             # canonical status constant — never a translated string (see data/status.py)
             game.status = STATUS_PURCHASED
             repo.update(game)
-            if saved > 0:
-                try:
-                    from services.savings_reporter import report_saving
-                    report_saving(saved, currency)
-                except Exception as e:  # noqa: BLE001 — stats only, never blocks a purchase
-                    log.info("savings report skipped: %s", e)
             return purchase
 
         def on_done(result):
@@ -443,6 +511,7 @@ class MarkPurchasedDialog(QDialog):
                     self._on_success(result)
                 except TypeError:
                     self._on_success()
+            verify_purchase(self.parentWidget(), result)     # outlives the dialog
             self.accept()
 
         run_async(self, work, on_done=on_done)

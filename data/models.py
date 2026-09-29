@@ -34,6 +34,11 @@ class Purchase:
     discount_pct:  int          # % discount at purchase
     edition:       str          # "Standard", "Deluxe", "Ultimate", etc.
     saved:         float        # base_price - price_paid
+    kind:          str = "game"                         # game · edition · bundle
+    items:         list = field(default_factory=list)  # [{app_id, name}] of an edition / bundle
+    verification:  str = ""     # "" never sent · verified · partial · unverified · unknown
+    verified_items: list = field(default_factory=list) # [{app_id, state, type}] from the server
+    saving_reported: bool = True  # saving already counted on pimpmysteam.com (old versions)
 
 
 @dataclass
@@ -71,6 +76,18 @@ class Game:
             return "Near low"
         else:
             return "Wait for sale"
+
+    @property
+    def is_at_low(self) -> bool:
+        """On sale right now at (or within 5 % of) the lowest price ever recorded.
+        A game at full price is never "at its low" — not even one that has
+        never been discounted (its "low" would just be the full price)."""
+        p, h = self.price, self.price_history
+        if not p or not h or not h.all_time_low or h.all_time_low <= 0:
+            return False
+        if not (p.is_on_sale and (p.discount_pct or 0) > 0):
+            return False
+        return p.current <= h.all_time_low * 1.05
 
     @property
     def price_diff_pct(self) -> Optional[float]:

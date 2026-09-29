@@ -105,11 +105,7 @@ class GameCard(Card):
             else:
                 self.base.hide(); self.disc.hide()
 
-        at_low = False
-        h = game.price_history
-        if p is not None and h is not None and h.all_time_low > 0:
-            at_low = p.current <= h.all_time_low * 1.05
-        self.low_tag.setVisible(at_low)
+        self.low_tag.setVisible(game.is_at_low)
 
         if game.status == "Purchased":
             self.setProperty("dimmed", "true")

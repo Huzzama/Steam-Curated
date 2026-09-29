@@ -1,10 +1,12 @@
 """
-Steam library stats (owned games, playtime) from the public community
-profile XML — no Web API key involved. The SteamID64 comes from the linked
+Steam library stats (owned games, playtime) from pimpmysteam.com
+(/steam/me/games, the key stays on the server) or, as a fallback, the public
+community profile XML — the app never holds a Web API key. The SteamID64 comes from the linked
 PimpMySteam account (creds.json). Errors are raised as LibraryError with
 a user-readable message — the view shows it instead of an empty tab.
 """
 import logging
+import re
 import time
 from typing import Optional
 
@@ -54,33 +56,88 @@ def _hours(text: Optional[str]) -> int:
 
 def get_owned_games(steam_id: str, api_key: str = None) -> list[dict]:
     """
-    Owned games with playtime from the public community profile
-    (steamcommunity.com/profiles/<id>/games?xml=1 — no API key needed, but the
-    profile's "Game details" must be public).
+    Owned games with playtime. First from pimpmysteam.com (GET /steam/me/games —
+    the Steam Web API through the server's key), falling back to the public
+    community profile XML (steamcommunity.com/profiles/<id>/games?xml=1) when
+    the backend doesn't have that endpoint yet or can't be reached.
     Each item: {appid, name, playtime_forever (min), playtime_2weeks (min)}
     """
+    def _from_backend() -> Optional[list[dict]]:
+        from services._http import ApiError, Unreachable
+        from services.steamkustom_auth import api, get_token
+        if not get_token():
+            return None
+        try:
+            data = api("/steam/me/games", timeout=30)
+        except (ApiError, Unreachable) as e:
+            log.info("library via backend unavailable (%s) — using the community XML", e)
+            return None
+        if data.get("private"):
+            raise LibraryError("Steam keeps your game list private — set “Game details” to Public "
+                               "in your Steam privacy settings.")
+        return [{"appid": str(g.get("appid", "")), "name": g.get("name") or "?",
+                 "playtime_forever": int(g.get("playtime_forever") or 0),
+                 "playtime_2weeks": int(g.get("playtime_2weeks") or 0)}
+                for g in data.get("games") or []]
+
     def _fetch():
-        import xml.etree.ElementTree as ET
         try:
             r = _SESSION.get(f"https://steamcommunity.com/profiles/{steam_id}/games",
                              params={"tab": "all", "xml": "1"}, timeout=20)
             r.raise_for_status()
-            root = ET.fromstring(r.content)
         except Exception as e:  # noqa: BLE001
             raise LibraryError(f"Steam community did not answer: {e}") from e
-        err = root.findtext("error")
-        if err:
-            raise LibraryError(err.strip())
-        games = []
-        for g in root.iter("game"):
-            games.append({
-                "appid":            g.findtext("appID", ""),
-                "name":             g.findtext("name", "") or "?",
-                "playtime_forever": _hours(g.findtext("hoursOnRecord")),
-                "playtime_2weeks":  _hours(g.findtext("hoursLast2Weeks")),
-            })
-        return games
-    return _cached(f"owned:{steam_id}", _fetch)
+        return parse_games_xml(r.content)
+
+    def _fetch_any():
+        games = _from_backend()
+        return games if games is not None else _fetch()
+    return _cached(f"owned:{steam_id}", _fetch_any)
+
+
+# XML 1.0 forbids most control characters even inside CDATA; Steam copies game
+# names verbatim, so one odd name used to break the whole library
+# ("not well-formed (invalid token): line 57, column 44").
+_BAD_XML_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+_GAME_RE = re.compile(r"<game>(.*?)</game>", re.S)
+
+
+def _tag(block: str, name: str) -> str:
+    m = re.search(rf"<{name}>\s*(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?\s*</{name}>", block, re.S)
+    return m.group(1).strip() if m else ""
+
+
+def parse_games_xml(content: bytes) -> list[dict]:
+    """Community games XML → [{appid, name, playtime_forever, playtime_2weeks}].
+    Tolerates invalid characters/bytes in game names; a web page instead of XML
+    (private profile, login wall, Steam hiccup) becomes a readable LibraryError."""
+    import xml.etree.ElementTree as ET
+    text = _BAD_XML_CHARS.sub("", content.decode("utf-8", errors="replace"))
+    head = text.lstrip()[:200].lower()
+    if head.startswith("<!doctype html") or head.startswith("<html"):
+        raise LibraryError("Steam answered with a web page instead of your game list — make sure "
+                           "your profile and “Game details” are Public in Steam's privacy settings.")
+
+    def row(appid, name, total, two_weeks):
+        return {"appid": appid or "", "name": name or "?",
+                "playtime_forever": _hours(total), "playtime_2weeks": _hours(two_weeks)}
+
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as e:
+        # still malformed: pull the <game> blocks out one by one
+        games = [row(_tag(b, "appID"), _tag(b, "name"), _tag(b, "hoursOnRecord"), _tag(b, "hoursLast2Weeks"))
+                 for b in _GAME_RE.findall(text)]
+        if games:
+            log.warning("library XML malformed (%s) — parsed %d games leniently", e, len(games))
+            return games
+        err = _tag(text, "error")
+        raise LibraryError(err or f"Steam sent an unreadable game list: {e}") from e
+    err = root.findtext("error")
+    if err:
+        raise LibraryError(err.strip())
+    return [row(g.findtext("appID", ""), g.findtext("name", ""), g.findtext("hoursOnRecord"),
+                g.findtext("hoursLast2Weeks")) for g in root.iter("game")]
 
 
 def get_recently_played(steam_id: str, api_key: str = None, count: int = 10) -> list[dict]:

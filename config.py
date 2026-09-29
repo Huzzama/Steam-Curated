@@ -36,6 +36,23 @@ def _get_bundle_dir() -> Path:
 BASE_DIR    = _get_base_dir()
 BUNDLE_DIR  = _get_bundle_dir()
 
+
+def _read_version() -> str:
+    """One VERSION file for the app, About, installers and Info.plist
+    (packaged builds carry a copy next to the bundled resources)."""
+    for p in (BUNDLE_DIR / "VERSION", Path(__file__).parent / "VERSION"):
+        try:
+            v = p.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+        except OSError:
+            continue
+    return "0.0.0"
+
+
+APP_VERSION = _read_version()
+APP_REPO    = "Huzzama/Steam-Curated"         # GitHub repo: releases + update check
+
 # Writable data paths (user data dir)
 ASSETS_DIR  = BASE_DIR / "assets"
 COVERS_DIR  = ASSETS_DIR / "covers"

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Steam Curator
+GenericName=Steam Wishlist Manager
+Comment=Your Steam wishlist with priorities, price history, all-time lows and Discord alerts
+Exec=steam-curator
+Icon=steam-curator
+Terminal=false
+Categories=Game;Utility;
+Keywords=steam;wishlist;sales;deals;prices;
+StartupNotify=true
+StartupWMClass=SteamCurator

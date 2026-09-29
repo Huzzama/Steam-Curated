@@ -42,7 +42,6 @@ from ui.theme import C, R, SP
 HERO_H = 208                 # hero banner height
 EVENT_CARD_W = 292           # upcoming-event card width (FlowLayout)
 FILTERS = ("all", "sa", "half", "low")
-_LOW_TOLERANCE = 1.05        # "at all-time low" = within 5 % of the low (same rule as GameCard)
 _YEAR_SUFFIX = re.compile(r"_(\d{4})$")
 _BANNER_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 _banner_cache: dict[str, QPixmap] = {}
@@ -55,8 +54,7 @@ def _on_sale(g: Game) -> bool:
 
 
 def _at_low(g: Game) -> bool:
-    p, h = g.price, g.price_history
-    return p is not None and h is not None and h.all_time_low > 0 and p.current <= h.all_time_low * _LOW_TOLERANCE
+    return g.is_at_low          # on sale now at its lowest recorded price (models.Game)
 
 
 def _is_purchased(g: Game) -> bool:

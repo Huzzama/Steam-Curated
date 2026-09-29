@@ -335,3 +335,108 @@ class Sparkline(_Chart):
         p.setPen(QPen(QColor(C["surface_2"]), 2))
         p.setBrush(QColor(self._color))
         p.drawEllipse(pts[-1], 4, 4)
+
+
+class DealTimeline(QWidget):
+    """
+    Past sale episodes on a time axis (last `months` months) + the predicted
+    next sale as a dashed bar. Bar height = discount %, deepest one in green.
+
+        t = DealTimeline()
+        t.set_data(episodes=[{"start": "2025-06-26", "end": "2025-07-10", "cut": 50}, …],
+                   prediction={"date": "2026-06-25", "cut": 50} | None)
+    """
+
+    def __init__(self, months: int = 24, height: int = 76, parent=None):
+        super().__init__(parent)
+        self._months = months
+        self._eps: list[dict] = []
+        self._pred: Optional[dict] = None
+        self.setMinimumHeight(height)
+        self.setMaximumHeight(height)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_data(self, episodes: Sequence[dict], prediction: Optional[dict] = None) -> None:
+        self._eps = list(episodes or [])
+        self._pred = prediction
+        self.update()
+
+    def paintEvent(self, e):
+        from datetime import date, timedelta
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        axis_h = 14
+        top, bottom = 6, h - axis_h
+        today = date.today()
+        start = today - timedelta(days=int(self._months * 30.4))
+        end = today + timedelta(days=200)
+        if self._pred:
+            try:
+                end = max(end, date.fromisoformat(self._pred["date"]) + timedelta(days=30))
+            except (KeyError, ValueError):
+                pass
+        span = max(1, (end - start).days)
+
+        def x_of(d):
+            return (d - start).days / span * (w - 2) + 1
+
+        def y_of(cut):
+            return bottom - (bottom - top) * max(0, min(100, cut)) / 100
+
+        # grid: 50 % line + baseline
+        p.setPen(QPen(QColor(C["border"]), 1, Qt.PenStyle.DotLine))
+        p.drawLine(QPointF(0, y_of(50)), QPointF(w, y_of(50)))
+        p.setPen(QPen(QColor(C["border_strong"]), 1))
+        p.drawLine(QPointF(0, bottom), QPointF(w, bottom))
+
+        # year ticks
+        p.setFont(font("2xs", family="mono"))
+        p.setPen(QColor(C["text_muted"]))
+        for y in range(start.year, end.year + 1):
+            d = date(y, 1, 1)
+            if start < d < end:
+                x = x_of(d)
+                p.setPen(QPen(QColor(C["border"]), 1))
+                p.drawLine(QPointF(x, top), QPointF(x, bottom))
+                p.setPen(QColor(C["text_muted"]))
+                p.drawText(QRectF(x + 3, bottom + 1, 40, axis_h - 1),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, str(y))
+
+        # episodes
+        best = max((ep.get("cut", 0) for ep in self._eps), default=0)
+        for ep in self._eps:
+            try:
+                s = date.fromisoformat(ep["start"])
+                en = date.fromisoformat(ep["end"]) if ep.get("end") else min(today, s + timedelta(days=10))
+            except (KeyError, ValueError):
+                continue
+            if en < start:
+                continue
+            x1, x2 = x_of(max(s, start)), x_of(en)
+            bw = max(3.0, x2 - x1)
+            cut = ep.get("cut", 0)
+            color = QColor(C["green"] if cut == best and best else C["accent"])
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawRoundedRect(QRectF(x1, y_of(cut), bw, bottom - y_of(cut)), 1.5, 1.5)
+
+        # prediction
+        if self._pred:
+            try:
+                d = date.fromisoformat(self._pred["date"])
+                cut = int(self._pred.get("cut") or 0)
+                x1 = x_of(d)
+                pen = QPen(QColor(C["gold"]), 1.2, Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(QRectF(x1, y_of(cut), max(6.0, x_of(d + timedelta(days=14)) - x1),
+                                         bottom - y_of(cut)), 1.5, 1.5)
+            except (KeyError, ValueError, TypeError):
+                pass
+
+        # today
+        xt = x_of(today)
+        p.setPen(QPen(QColor(C["text_dim"]), 1))
+        p.drawLine(QPointF(xt, top - 2), QPointF(xt, bottom))
+        p.end()

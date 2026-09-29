@@ -13,7 +13,7 @@ _DEFAULTS = {
     "country":         "mx",
     "timezone":        "GMT-6",
     "steamgriddb_key": "",
-    "itad_key":        "",
+    "last_price_check": 0,
     "compare_regions": [],
 }
 

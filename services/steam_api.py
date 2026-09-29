@@ -195,17 +195,17 @@ def bulk_refresh_prices(
                     with lock:
                         failed_c[0] += 1
 
-        # Feed the local price log (tier-2 history) and pull all-time lows —
-        # ITAD in two batched requests when a key is set, observed log otherwise.
+        # Feed the deal history with what we just saw and re-derive every
+        # all-time low from it, in the user's currency.
         try:
             from services import price_history
             price_history.observe_many((g.app_id, g.price) for g in games)
-            hists = price_history.get_price_histories(games, country, force=force)
+            hists = price_history.get_price_histories(games, country, force=False)
             with lock:
                 saving = {id(g) for g in to_save}
                 for g in games:
                     merged = price_history.merge(g.price_history, hists.get(str(g.app_id)))
-                    if merged is not None and merged != g.price_history:
+                    if merged != g.price_history:
                         g.price_history = merged
                         if id(g) not in saving:
                             to_save.append(g)

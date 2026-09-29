@@ -18,6 +18,7 @@ from PySide6.QtSvg import QSvgRenderer
 
 # name -> inner SVG (24x24 viewBox, stroke-based)
 ICONS: dict[str, str] = {
+    "scale": "<path d=\"M12 3v18\" /> <path d=\"m19 8 3 8a5 5 0 0 1-6 0zV7\" /> <path d=\"M3 7h1a17 17 0 0 0 8-2 17 17 0 0 0 8 2h1\" /> <path d=\"m5 8 3 8a5 5 0 0 1-6 0zV7\" /> <path d=\"M7 21h10\" />",
     "arrow-left": "<path d='m12 19-7-7 7-7' /> <path d='M19 12H5' />",
     "arrow-right": "<path d='M5 12h14' /> <path d='m12 5 7 7-7 7' />",
     "arrow-up-right": "<path d='M7 7h10v10' /> <path d='M7 17 17 7' />",
